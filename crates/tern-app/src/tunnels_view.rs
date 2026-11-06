@@ -1,13 +1,17 @@
 //! Tunnels section data -> list rows and detail text (S6-T01).
 
-use tern_core::{Host, Tunnel, TunnelKind};
+use std::collections::HashMap;
+
+use tern_core::{Host, Tunnel, TunnelId, TunnelKind};
 
 use crate::list::Item;
+use crate::tunnel_run::TunStatus;
 
 #[derive(Debug, Clone, Default)]
 pub struct TunnelsData {
     pub tunnels: Vec<Tunnel>,
     pub hosts: Vec<Host>,
+    pub status: HashMap<TunnelId, TunStatus>,
 }
 
 pub fn kind_label(kind: TunnelKind) -> &'static str {
@@ -46,10 +50,13 @@ impl TunnelsData {
                 Item::leaf(t.label.clone(), 0)
                     .with_id(t.id.to_string())
                     .with_meta(format!(
-                        "{}  {}  via {}  stopped",
+                        "{}  {}  via {}  {}",
                         kind_label(t.kind),
                         route(t),
-                        self.host_label(t)
+                        self.host_label(t),
+                        self.status
+                            .get(&t.id)
+                            .map_or_else(|| "stopped".to_owned(), TunStatus::label)
                     ))
             })
             .collect()
@@ -58,11 +65,14 @@ impl TunnelsData {
     pub fn detail(&self, id: &str) -> Option<String> {
         let t = self.tunnel(id)?;
         let mut s = format!(
-            "{}\n\nKind        {}\nRoute       {}\nHost        {}\nAuto-start  {}",
+            "{}\n\nKind        {}\nRoute       {}\nHost        {}\nStatus      {}\nAuto-start  {}",
             t.label,
             kind_label(t.kind),
             route(t),
             self.host_label(t),
+            self.status
+                .get(&t.id)
+                .map_or_else(|| "stopped".to_owned(), TunStatus::label),
             if t.auto_start { "yes" } else { "no" }
         );
         if let Some(w) = t.bind_warning() {
@@ -93,6 +103,7 @@ mod tests {
         TunnelsData {
             tunnels: vec![t],
             hosts: vec![host],
+            status: HashMap::new(),
         }
     }
 

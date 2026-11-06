@@ -27,6 +27,8 @@ pub enum Target {
     Action(Action),
     /// "Connect: <host label>"; carries the host id.
     Connect(String),
+    /// "Start/Stop tunnel: <label>"; carries the tunnel id (S6-T07).
+    ToggleTunnel(String),
     /// Connect to a typed `user@host[:port]` without saving it (S4-T07).
     Quick(QuickTarget),
     /// Save a typed `user@host[:port]` as a new host.
@@ -112,7 +114,30 @@ pub struct HostRef {
     pub detail: String,
 }
 
+/// A saved tunnel as offered by the palette.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TunnelRef {
+    pub id: String,
+    pub label: String,
+    pub running: bool,
+}
+
 impl Palette {
+    /// Add "Start/Stop tunnel: X" entries after [`Palette::open`].
+    pub fn add_tunnels(&mut self, tunnels: &[TunnelRef]) {
+        self.entries.extend(tunnels.iter().map(|t| Entry {
+            title: format!(
+                "{} tunnel: {}",
+                if t.running { "Stop" } else { "Start" },
+                t.label
+            ),
+            target: Target::ToggleTunnel(t.id.clone()),
+            keys: String::new(),
+            recent_key: format!("tunnel:{}", t.label),
+        }));
+        self.refresh();
+    }
+
     /// Open as a host-only picker (`Ctrl+Shift+O`).
     pub fn open_hosts(&mut self, hosts: &[HostRef]) {
         self.open(&Keymap::defaults(), hosts);
@@ -365,6 +390,27 @@ mod tests {
             p.selected_entry().map(|e| e.keys.as_str()),
             Some("Ctrl+Shift+L")
         );
+    }
+
+    #[test]
+    fn tunnel_entries_say_start_or_stop() {
+        let mut p = open(&[]);
+        p.add_tunnels(&[
+            TunnelRef {
+                id: "1".into(),
+                label: "db-forward".into(),
+                running: false,
+            },
+            TunnelRef {
+                id: "2".into(),
+                label: "socks".into(),
+                running: true,
+            },
+        ]);
+        p.set_query("tunnel db".into());
+        assert_eq!(top(&p), Some("Start tunnel: db-forward"));
+        p.set_query("tunnel socks".into());
+        assert_eq!(top(&p), Some("Stop tunnel: socks"));
     }
 
     #[test]

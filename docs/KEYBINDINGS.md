@@ -63,7 +63,8 @@ A remote shell needs `Ctrl+A`, `Ctrl+W`, `Ctrl+K`, etc. So while a terminal is f
 | `d d` | Delete selected (with confirm) |
 | `y` | Duplicate selected |
 | `1`..`4` | Switch section: Hosts, Keys, Identities, Tunnels |
-| `t` (on a host) | Start/stop its tunnels |
+| `t` (on a host) | Start/stop all of its tunnels (on a tunnel: toggle it) |
+| `Enter` (on a tunnel) | Start/stop the tunnel |
 
 ### Forms
 

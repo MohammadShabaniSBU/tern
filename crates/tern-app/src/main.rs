@@ -19,6 +19,7 @@ mod sessions;
 mod term_settings;
 mod toast;
 mod tunnel_form;
+mod tunnel_run;
 mod tunnels_view;
 
 use app::State;

@@ -295,7 +295,10 @@ async fn terminal_and_headless_user_share_one_connection() {
 }
 
 async fn shared(e: &Env) -> tern_ssh::SharedConn {
-    let known = Arc::new(MemKnown::default());
+    shared_with(e, Arc::new(MemKnown::default())).await
+}
+
+async fn shared_with(e: &Env, known: Arc<MemKnown>) -> tern_ssh::SharedConn {
     // Trust the host key the way a first terminal connect would.
     let (h, mut rx) = spawn(params(e, &e.password), known.clone());
     loop {
@@ -443,4 +446,61 @@ async fn remote_forward_reaches_a_local_target() {
     assert_eq!(got, "hello-r!");
     l.stop().await;
     r.stop().await;
+}
+
+#[tokio::test]
+async fn manager_starts_reports_and_stops_a_tunnel() {
+    use tern_core::TunnelId;
+    use tern_ssh::manager::{self, TunnelCommand, TunnelEvent};
+    let Some(e) = env() else { return };
+    let known = Arc::new(MemKnown::default());
+    // Unknown host key + no UI: the tunnel must fail with a helpful error, not hang.
+    let (mgr, mut rx) = manager::spawn(ConnectionPool::new(), known.clone(), false);
+    let id = TunnelId::new();
+    let port = free_port().await;
+    let start = |mgr: &manager::TunnelManagerHandle| {
+        mgr.send(TunnelCommand::Start {
+            id,
+            pool_key: "h".into(),
+            params: Box::new(params(&e, &e.password)),
+            spec: spec(TunnelKind::Local, port, Some(("127.0.0.1", 2222))),
+        })
+    };
+    start(&mgr);
+    let mut saw_error = false;
+    while let Some(ev) = rx.recv().await {
+        if let TunnelEvent::Error {
+            message, retrying, ..
+        } = ev
+        {
+            assert!(!retrying && message.contains("connect once"), "{message}");
+            saw_error = true;
+            break;
+        }
+    }
+    assert!(saw_error);
+
+    // After trusting the key (as a terminal connect would), it comes up and stops cleanly.
+    drop(shared_with(&e, known.clone()).await);
+    start(&mgr);
+    loop {
+        match tokio::time::timeout(Duration::from_secs(10), rx.recv()).await {
+            Ok(Some(TunnelEvent::Active(_))) => break,
+            Ok(Some(TunnelEvent::Error { message, .. })) => panic!("{message}"),
+            Ok(Some(_)) => {}
+            _ => panic!("no Active event"),
+        }
+    }
+    assert_eq!(
+        read_banner(TcpStream::connect(("127.0.0.1", port)).await.unwrap()).await,
+        "SSH-2.0-"
+    );
+    mgr.send(TunnelCommand::StopAll);
+    loop {
+        match tokio::time::timeout(Duration::from_secs(10), rx.recv()).await {
+            Ok(Some(TunnelEvent::Stopped(_))) => break,
+            Ok(Some(_)) => {}
+            _ => panic!("no Stopped event"),
+        }
+    }
 }

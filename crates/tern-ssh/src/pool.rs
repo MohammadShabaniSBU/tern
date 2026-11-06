@@ -68,3 +68,11 @@ impl ConnectionPool {
             .count()
     }
 }
+
+impl std::fmt::Debug for ConnectionPool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConnectionPool")
+            .field("live", &self.live())
+            .finish()
+    }
+}

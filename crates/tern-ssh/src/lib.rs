@@ -2,6 +2,7 @@
 
 pub mod keys;
 pub mod known_hosts;
+pub mod manager;
 pub mod pool;
 pub mod session;
 pub mod socks5;

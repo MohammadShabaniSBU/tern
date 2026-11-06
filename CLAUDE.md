@@ -7,7 +7,9 @@ Full plan lives in `docs/` — read `docs/README.md`, `docs/ARCHITECTURE.md`, `d
 
 ## Current status
 
-Sprint 0–5 are done (S0-T03 CI was skipped by the user). Do not write code for later sprints until the user starts the next one (`docs/sprints/sprint-06-tunnels.md`).
+Sprint 0–6 are done (S0-T03 CI was skipped by the user). Do not write code for later sprints until the user starts the next one (`docs/sprints/sprint-07-*.md`).
+
+Sprint 6 (tunnels): `tern-ssh` has `pool.rs` (`ConnectionPool`, weak refs keyed by host id; terminals use `spawn_pooled`, tunnels `get_or_connect` headless — unknown host key or interactive auth makes the tunnel fail with "connect once from a terminal first"), `tunnel.rs` (-L/-R/-D over a `SharedConn`), `socks5.rs`, `manager.rs` (`TunnelCommand`/`TunnelEvent`, supervised with backoff; setting `tunnel.reconnect`=`false` disables retries). `tern-app`: `tunnels_view.rs`, `tunnel_form.rs`, `tunnel_run.rs` (status + subscription); lock sends `StopAll`; `auto_start` tunnels start after unlock. Live forwarding tests need a server with `AllowTcpForwarding yes` (the stock linuxserver image has it off: `docker exec <c> sed -i 's/^AllowTcpForwarding no/AllowTcpForwarding yes/' /config/sshd/sshd_config`, plus `MaxStartups 200:30:300` and `PerSourcePenalties no` to avoid flaky drops, then restart).
 
 Sprint 4: `tern-ssh` has `session.rs` (`spawn(ConnectParams, Arc<dyn KnownHostsStore>)` → `SessionHandle` + event `Receiver`; auth key → password → keyboard-interactive; output coalesced ~16 ms/64 KiB) and `known_hosts.rs`. `tern-app/src/sessions.rs` holds `SessionView` (one per tab, owns the emulator), credential `resolve`, `AppKnownHosts`, the iced subscription, tab bar and tab view. Live tests: `crates/tern-ssh/tests/live.rs`, skipped unless `TERN_SSH_TEST_ADDR=host:port TERN_SSH_TEST_USER=… TERN_SSH_TEST_PASSWORD=…` are set (e.g. `docker run -d -p 127.0.0.1:2222:2222 -e PASSWORD_ACCESS=true -e USER_NAME=tern -e USER_PASSWORD=ternpass lscr.io/linuxserver/openssh-server`). russh 0.65's `check_server_key` takes `russh::keys::PublicKeyOrCertificate`.
 

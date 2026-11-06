@@ -24,6 +24,7 @@ use crate::sessions::{self, AppKnownHosts, ConnTarget, Phase, SessionId, Session
 use crate::term_settings::{self, TermSettings};
 use crate::toast::{ToastKind, Toasts};
 use crate::tunnel_form::{self, TField, TunnelForm};
+use crate::tunnel_run::{self, TunState, TunStatus, TunnelMgr};
 use crate::tunnels_view::TunnelsData;
 use tern_term::widget::TermEvent;
 use tern_term::{Motion, SelectKind};
@@ -126,6 +127,12 @@ pub struct State {
     identity_form: Option<IdentityForm>,
     tunnels_data: TunnelsData,
     tunnel_form: Option<TunnelForm>,
+    pool: tern_ssh::ConnectionPool,
+    tunnel_mgr: Option<TunnelMgr>,
+    tunnel_status: std::collections::HashMap<tern_core::TunnelId, TunStatus>,
+    /// Set after unlock; cleared once the `auto_start` tunnels have been started.
+    autostart_pending: bool,
+    tunnels_loaded: bool,
     /// Incremented per password copy so only the latest copy's timer clears the clipboard.
     clip_token: u64,
     gate: Gate,
@@ -196,6 +203,12 @@ pub enum Message {
     HostSaved(Result<String, String>),
     KeysLoaded(Result<KeysData, String>),
     TunnelsLoaded(Result<Vec<tern_core::Tunnel>, String>),
+    TunnelMgrReady(TunnelMgr),
+    TunnelResolved(
+        tern_core::TunnelId,
+        Result<Box<tern_ssh::ConnectParams>, String>,
+    ),
+    Tunnel(tern_ssh::manager::TunnelEvent),
     TunnelEdit(TField, String),
     TunnelHost(Choice),
     TunnelKind(Choice),
@@ -279,6 +292,11 @@ impl State {
             keys_data: KeysData::default(),
             tunnels_data: TunnelsData::default(),
             tunnel_form: None,
+            pool: tern_ssh::ConnectionPool::new(),
+            tunnel_mgr: None,
+            tunnel_status: std::collections::HashMap::new(),
+            autostart_pending: false,
+            tunnels_loaded: false,
             key_form: None,
             ids_data: IdentitiesData::default(),
             identity_form: None,
@@ -537,10 +555,24 @@ impl State {
                     tracing::error!(error = %e, "could not load tunnels");
                     self.toast(ToastKind::Error, "Could not load tunnels");
                 }
+                self.tunnels_loaded = r.is_ok();
                 self.tunnels_data.tunnels = r.unwrap_or_default();
                 self.rebuild_tunnels_list();
+                self.maybe_autostart()
+            }
+            Message::TunnelMgrReady(mgr) => {
+                self.tunnel_mgr = Some(mgr);
+                self.maybe_autostart()
+            }
+            Message::TunnelResolved(id, Ok(params)) => {
+                self.send_tunnel_start(id, *params);
                 Task::none()
             }
+            Message::TunnelResolved(id, Err(e)) => {
+                self.set_tunnel_error(id, e, false);
+                Task::none()
+            }
+            Message::Tunnel(event) => self.on_tunnel_event(event),
             Message::TunnelEdit(field, value) => self.edit_tunnel_form(|f| f.set(field, value)),
             Message::TunnelHost(c) => self.edit_tunnel_form(|f| f.pick_host(c)),
             Message::TunnelKind(c) => self.edit_tunnel_form(|f| f.pick_kind(c)),
@@ -699,6 +731,9 @@ impl State {
                 self.host_form = None;
                 self.tunnel_form = None;
                 self.tunnels_data = TunnelsData::default();
+                self.stop_all_tunnels();
+                self.tunnels_loaded = false;
+                self.autostart_pending = false;
                 self.prompt = None;
                 self.key_form = None;
                 self.identity_form = None;
@@ -1064,6 +1099,8 @@ impl State {
                     _ => Task::none(),
                 }
             }
+            Action::ToggleTunnels => self.toggle_tunnels_action(),
+            Action::Open if self.section == Section::Tunnels => self.toggle_tunnels_action(),
             Action::Open if self.section == Section::Hosts => {
                 let Some(item) = self.list().selected_item() else {
                     return Task::none();
@@ -1259,6 +1296,7 @@ impl State {
                 }
                 _ => {
                     self.palette.open(&self.keymap, &self.hosts);
+                    self.palette.add_tunnels(&self.tunnel_refs());
                     self.mode = Mode::Palette;
                     self.matcher.reset();
                     iced::widget::operation::focus(palette::PALETTE_ID)
@@ -1274,6 +1312,7 @@ impl State {
             }
             Action::PaletteRun => self.run_palette_selection(),
             Action::LockVault => {
+                self.stop_all_tunnels();
                 self.close_all_tabs();
                 let store = self.store.clone();
                 Task::perform(async move { store.lock().await }, |r| {
@@ -1376,6 +1415,7 @@ impl State {
         let run = match entry.target {
             Target::Action(action) => self.dispatch(action),
             Target::Connect(host_id) => self.start_session(ConnTarget::Saved(host_id)),
+            Target::ToggleTunnel(id) => self.toggle_tunnel_ids(&[id]),
             Target::Quick(q) => self.start_session(ConnTarget::Quick(q)),
             Target::SaveQuick(q) => self.save_quick_host(q),
         };
@@ -1426,6 +1466,7 @@ impl State {
         self.mode = Mode::Normal;
         self.matcher.reset();
         let store = self.store.clone();
+        let pool = self.pool.clone();
         let (cols, rows) = self.term_size;
         Task::perform(
             async move {
@@ -1433,7 +1474,11 @@ impl State {
                 params.cols = cols as u32;
                 params.rows = rows as u32;
                 let known = std::sync::Arc::new(AppKnownHosts(store));
-                let (handle, rx) = tern_ssh::spawn(params, known);
+                let pool_key = match &target {
+                    ConnTarget::Saved(id) => Some((pool, id.clone())),
+                    ConnTarget::Quick(_) => None,
+                };
+                let (handle, rx) = tern_ssh::spawn_pooled(params, known, pool_key);
                 Ok(Spawned {
                     handle,
                     source: sessions::EventSource::new(id, rx),
@@ -2421,6 +2466,202 @@ impl State {
         )
     }
 
+    fn active_tunnel_count(&self) -> usize {
+        self.tunnel_status
+            .values()
+            .filter(|s| s.state == TunState::Active)
+            .count()
+    }
+
+    fn tunnel_refs(&self) -> Vec<palette::TunnelRef> {
+        self.tunnels_data
+            .tunnels
+            .iter()
+            .map(|t| palette::TunnelRef {
+                id: t.id.to_string(),
+                label: t.label.clone(),
+                running: self
+                    .tunnel_status
+                    .get(&t.id)
+                    .is_some_and(|s| s.is_running()),
+            })
+            .collect()
+    }
+
+    fn send_tunnel_start(&mut self, id: tern_core::TunnelId, params: tern_ssh::ConnectParams) {
+        let (Some(mgr), Some(t)) = (
+            &self.tunnel_mgr,
+            self.tunnels_data.tunnels.iter().find(|t| t.id == id),
+        ) else {
+            return;
+        };
+        mgr.handle.send(tern_ssh::manager::TunnelCommand::Start {
+            id,
+            pool_key: t.host_id.to_string(),
+            params: Box::new(params),
+            spec: tern_ssh::tunnel::TunnelSpec {
+                kind: t.kind,
+                bind_addr: t.bind_addr.clone(),
+                bind_port: t.bind_port,
+                target_host: t.target_host.clone(),
+                target_port: t.target_port,
+            },
+        });
+    }
+
+    fn set_tunnel_error(&mut self, id: tern_core::TunnelId, message: String, retrying: bool) {
+        if !retrying {
+            let label = self
+                .tunnels_data
+                .tunnels
+                .iter()
+                .find(|t| t.id == id)
+                .map_or_else(|| "tunnel".to_owned(), |t| t.label.clone());
+            self.toast(ToastKind::Error, format!("Tunnel '{label}': {message}"));
+        }
+        self.tunnel_status
+            .insert(id, TunStatus::new(TunState::Error { message, retrying }));
+        self.refresh_tunnel_rows();
+    }
+
+    fn refresh_tunnel_rows(&mut self) {
+        self.tunnels_data.status = self.tunnel_status.clone();
+        self.rebuild_tunnels_list();
+    }
+
+    fn on_tunnel_event(&mut self, event: tern_ssh::manager::TunnelEvent) -> Task<Message> {
+        use tern_ssh::manager::TunnelEvent as E;
+        match event {
+            E::Starting(id) => {
+                self.tunnel_status
+                    .insert(id, TunStatus::new(TunState::Starting));
+            }
+            E::Active(id) => {
+                self.tunnel_status
+                    .insert(id, TunStatus::new(TunState::Active));
+            }
+            E::Error {
+                id,
+                message,
+                retrying,
+            } => {
+                self.set_tunnel_error(id, message, retrying);
+                return Task::none();
+            }
+            E::Stopped(id) => {
+                self.tunnel_status.remove(&id);
+            }
+            E::Stats { id, conns, bytes } => {
+                if let Some(s) = self.tunnel_status.get_mut(&id) {
+                    s.conns = conns;
+                    s.bytes = bytes;
+                }
+            }
+        }
+        self.refresh_tunnel_rows();
+        Task::none()
+    }
+
+    fn stop_all_tunnels(&mut self) {
+        if let Some(mgr) = &self.tunnel_mgr {
+            mgr.handle.send(tern_ssh::manager::TunnelCommand::StopAll);
+        }
+        self.tunnel_status.clear();
+        self.tunnels_data.status.clear();
+    }
+
+    /// Start every `auto_start` tunnel once the manager and the tunnel list are both ready.
+    fn maybe_autostart(&mut self) -> Task<Message> {
+        if !self.autostart_pending || self.tunnel_mgr.is_none() || !self.tunnels_loaded {
+            return Task::none();
+        }
+        self.autostart_pending = false;
+        let ids: Vec<String> = self
+            .tunnels_data
+            .tunnels
+            .iter()
+            .filter(|t| t.auto_start)
+            .map(|t| t.id.to_string())
+            .collect();
+        self.refresh_tunnel_rows();
+        self.set_tunnels_running(&ids, true)
+    }
+
+    /// `t` / `Enter`: toggle the selected tunnel, or all tunnels of the selected host.
+    fn toggle_tunnels_action(&mut self) -> Task<Message> {
+        let Some(item) = self.list().selected_item().cloned() else {
+            return Task::none();
+        };
+        let ids: Vec<String> = match (self.section, item.id) {
+            (Section::Tunnels, Some(id)) => vec![id],
+            (Section::Hosts, Some(host_id)) if item.group.is_none() => self
+                .tunnels_data
+                .tunnels
+                .iter()
+                .filter(|t| t.host_id.to_string() == host_id)
+                .map(|t| t.id.to_string())
+                .collect(),
+            _ => Vec::new(),
+        };
+        if ids.is_empty() {
+            self.toast(ToastKind::Info, "No tunnels for this selection");
+            return Task::none();
+        }
+        self.toggle_tunnel_ids(&ids)
+    }
+
+    /// If any of `ids` is running, stop them all; otherwise start them all.
+    fn toggle_tunnel_ids(&mut self, ids: &[String]) -> Task<Message> {
+        let any_running = ids.iter().any(|i| {
+            i.parse::<tern_core::TunnelId>()
+                .ok()
+                .and_then(|id| self.tunnel_status.get(&id))
+                .is_some_and(TunStatus::is_running)
+        });
+        self.set_tunnels_running(ids, !any_running)
+    }
+
+    fn set_tunnels_running(&mut self, ids: &[String], run: bool) -> Task<Message> {
+        if self.tunnel_mgr.is_none() {
+            self.toast(ToastKind::Info, "Tunnel manager is not ready yet");
+            return Task::none();
+        }
+        let mut tasks = Vec::new();
+        for id in ids
+            .iter()
+            .filter_map(|i| i.parse::<tern_core::TunnelId>().ok())
+        {
+            if !run {
+                if let Some(mgr) = &self.tunnel_mgr {
+                    mgr.handle.send(tern_ssh::manager::TunnelCommand::Stop(id));
+                }
+                continue;
+            }
+            let Some(host_id) = self
+                .tunnels_data
+                .tunnels
+                .iter()
+                .find(|t| t.id == id)
+                .map(|t| t.host_id.to_string())
+            else {
+                continue;
+            };
+            self.tunnel_status
+                .insert(id, TunStatus::new(TunState::Starting));
+            let store = self.store.clone();
+            tasks.push(Task::perform(
+                async move {
+                    sessions::resolve(&store, &ConnTarget::Saved(host_id))
+                        .await
+                        .map(Box::new)
+                },
+                move |r| Message::TunnelResolved(id, r),
+            ));
+        }
+        self.refresh_tunnel_rows();
+        Task::batch(tasks)
+    }
+
     fn rebuild_tunnels_list(&mut self) {
         let items = self.tunnels_data.items();
         self.lists[3].replace_items(items);
@@ -2738,7 +2979,28 @@ impl State {
                 |r| Message::SettingsLoaded(r.map_err(|e| e.to_string())),
             )
         };
+        self.autostart_pending = true;
+        let mgr = if self.tunnel_mgr.is_none() {
+            let (pool, store) = (self.pool.clone(), self.store.clone());
+            Task::perform(
+                async move {
+                    let reconnect = store
+                        .query(|db| db.settings().get("tunnel.reconnect"))
+                        .await
+                        .ok()
+                        .flatten()
+                        .is_none_or(|v: String| v.trim() != "false");
+                    let known = std::sync::Arc::new(AppKnownHosts(store));
+                    let (handle, rx) = tern_ssh::manager::spawn(pool, known, reconnect);
+                    TunnelMgr::new(handle, rx)
+                },
+                Message::TunnelMgrReady,
+            )
+        } else {
+            Task::none()
+        };
         Task::batch([
+            mgr,
             hosts,
             keymap,
             self.reload_keys(),
@@ -2860,6 +3122,10 @@ impl State {
             .size(14),
             space().width(Fill),
         ];
+        let active = self.active_tunnel_count();
+        if active > 0 {
+            status = status.push(text(format!("⇄ {active} tunnel(s)   ")).size(14));
+        }
         if let Some(toast) = self.toasts.current() {
             let style: fn(&Theme) -> text::Style = match toast.kind {
                 ToastKind::Info => text::base,
@@ -2928,6 +3194,9 @@ impl State {
                 iced::time::every(std::time::Duration::from_millis(120))
                     .map(|_| Message::SpinnerTick),
             );
+        }
+        if let Some(mgr) = &self.tunnel_mgr {
+            subs.push(tunnel_run::subscription(mgr));
         }
         for s in &self.tabs {
             if let Some(src) = &s.source {
@@ -3126,6 +3395,40 @@ mod tests {
         assert_eq!(s.mode, Mode::Palette);
         let _ = s.update(Message::Dispatch(Action::OpenPalette));
         assert_eq!(s.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn tunnel_events_drive_status_and_the_active_count() {
+        use tern_ssh::manager::TunnelEvent as E;
+        let mut s = main_state();
+        let id = tern_core::TunnelId::new();
+        let _ = s.update(Message::Tunnel(E::Starting(id)));
+        assert_eq!(s.active_tunnel_count(), 0);
+        let _ = s.update(Message::Tunnel(E::Active(id)));
+        let _ = s.update(Message::Tunnel(E::Stats {
+            id,
+            conns: 2,
+            bytes: 10,
+        }));
+        assert_eq!(s.active_tunnel_count(), 1);
+        assert_eq!(s.tunnel_status[&id].bytes, 10);
+        let _ = s.update(Message::Tunnel(E::Error {
+            id,
+            message: "lost".into(),
+            retrying: true,
+        }));
+        assert_eq!(s.active_tunnel_count(), 0);
+        assert!(s.tunnel_status[&id].is_running());
+        let _ = s.update(Message::Tunnel(E::Stopped(id)));
+        assert!(s.tunnel_status.is_empty());
+    }
+
+    #[test]
+    fn toggling_tunnels_without_any_just_toasts() {
+        let mut s = main_state();
+        let _ = s.update(Message::Dispatch(Action::GoTunnels));
+        let _ = s.update(Message::Dispatch(Action::ToggleTunnels));
+        assert!(s.tunnel_status.is_empty());
     }
 
     #[test]
