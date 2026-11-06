@@ -207,6 +207,39 @@ mod tests {
     use super::*;
     use tern_core::{Host, KeyId};
 
+    #[test]
+    fn secret_bearing_entries_never_debug_print_secrets() {
+        let id = IdentityEntry {
+            identity: tern_core::Identity {
+                id: tern_core::IdentityId::new(),
+                label: "l".into(),
+                username: "u".into(),
+                ssh_key_id: None,
+            },
+            password: Some("hunter2-secret".into()),
+        };
+        let key = KeyEntry {
+            meta: SshKeyMeta {
+                id: KeyId::new(),
+                label: "k".into(),
+                key_type: "ssh-ed25519".into(),
+                public_key: "pub".into(),
+                fingerprint: "fp".into(),
+            },
+            private_key: Some("PRIVATE-KEY-BODY".into()),
+            passphrase: Some("pass-phrase-secret".into()),
+        };
+        let payload = Payload {
+            identities: vec![id.clone()],
+            ssh_keys: vec![key.clone()],
+            ..Payload::default()
+        };
+        let dbg = format!("{id:?} {key:?} {payload:?}");
+        for needle in ["hunter2", "PRIVATE-KEY-BODY", "pass-phrase-secret"] {
+            assert!(!dbg.contains(needle), "{needle} leaked: {dbg}");
+        }
+    }
+
     fn pw(s: &str) -> SecretString {
         SecretString::from(s.to_string())
     }

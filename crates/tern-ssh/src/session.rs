@@ -775,6 +775,21 @@ mod jump_tests {
     use super::*;
 
     #[test]
+    fn connect_params_debug_never_prints_secrets() {
+        let mut p = ConnectParams::new("h", 22, "u");
+        p.password = Some(SecretString::from("pw-secret-1".to_owned()));
+        p.key = Some(KeyAuth {
+            pem: SecretString::from("PEM-SECRET".to_owned()),
+            passphrase: Some(SecretString::from("pp-secret-2".to_owned())),
+        });
+        p.jump = Some(Box::new(p.clone()));
+        let dbg = format!("{p:?}");
+        for needle in ["pw-secret-1", "PEM-SECRET", "pp-secret-2"] {
+            assert!(!dbg.contains(needle), "{needle} leaked: {dbg}");
+        }
+    }
+
+    #[test]
     fn hop_path_is_outermost_first() {
         let mut a = ConnectParams::new("a", 22, "u");
         let mut b = ConnectParams::new("b", 22, "u");
