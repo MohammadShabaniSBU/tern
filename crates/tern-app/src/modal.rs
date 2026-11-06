@@ -23,6 +23,15 @@ pub enum Modal {
     },
     /// Keybinding cheat sheet, filtered to the mode it was opened from.
     CheatSheet { mode: ModeMask },
+    /// Server host key needs a decision (S4-T03).
+    HostKey {
+        host: String,
+        port: u16,
+        key_type: String,
+        fingerprint: String,
+        /// Previously trusted fingerprint when the key changed.
+        changed_from: Option<String>,
+    },
 }
 
 /// Last-in-first-out stack; only the top modal receives keys.
@@ -56,7 +65,68 @@ pub fn view<'a>(modal: &'a Modal, keymap: &Keymap) -> Element<'a, Message> {
     match modal {
         Modal::Confirm { title, body, .. } => confirm_view(title, body),
         Modal::CheatSheet { mode } => cheatsheet::view(keymap, *mode),
+        Modal::HostKey {
+            host,
+            port,
+            key_type,
+            fingerprint,
+            changed_from,
+        } => host_key_view(host, *port, key_type, fingerprint, changed_from.as_deref()),
     }
+}
+
+fn host_key_view<'a>(
+    host: &'a str,
+    port: u16,
+    key_type: &'a str,
+    fingerprint: &'a str,
+    changed_from: Option<&'a str>,
+) -> Element<'a, Message> {
+    let mut body = column![].spacing(8);
+    if let Some(old) = changed_from {
+        body = body
+            .push(
+                text("WARNING: HOST KEY HAS CHANGED")
+                    .size(20)
+                    .style(text::danger),
+            )
+            .push(
+                text(format!(
+                    "The key for {host}:{port} is different from the one you trusted. \
+                     Someone may be intercepting the connection, or the server was reinstalled."
+                ))
+                .size(14),
+            )
+            .push(text(format!("Old: {old}")).size(13))
+            .push(text(format!("New: {fingerprint}  ({key_type})")).size(13))
+            .push(space().height(8))
+            .push(text("[n] / Esc  Abort (recommended)").size(13))
+            .push(text("[Shift+R]  Replace the stored key and connect").size(13));
+    } else {
+        body = body
+            .push(text("Unknown host").size(18))
+            .push(text(format!("First connection to {host}:{port}.")).size(14))
+            .push(text(format!("{key_type}  {fingerprint}")).size(13))
+            .push(space().height(8))
+            .push(text("[y] / Enter  Trust and save").size(13))
+            .push(text("[n] / Esc  Abort").size(13));
+    }
+    let dialog = container(body)
+        .padding(20)
+        .max_width(560)
+        .style(|theme: &Theme| {
+            let mut s = container::bordered_box(theme);
+            s.background = Some(theme.extended_palette().background.base.color.into());
+            s
+        });
+    container(dialog)
+        .center(Fill)
+        .align_x(Center)
+        .style(|_| container::Style {
+            background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.55).into()),
+            ..container::Style::default()
+        })
+        .into()
 }
 
 fn confirm_view<'a>(title: &'a str, body: &'a str) -> Element<'a, Message> {

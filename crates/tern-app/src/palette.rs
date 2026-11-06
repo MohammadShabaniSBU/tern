@@ -25,8 +25,58 @@ const RECENT_BONUS: u32 = 60;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
     Action(Action),
-    /// "Connect: <host label>". Running it is wired up with the SSH engine (Sprint 4).
+    /// "Connect: <host label>"; carries the host id.
     Connect(String),
+    /// Connect to a typed `user@host[:port]` without saving it (S4-T07).
+    Quick(QuickTarget),
+    /// Save a typed `user@host[:port]` as a new host.
+    SaveQuick(QuickTarget),
+}
+
+/// A parsed `user@host[:port]` connect string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuickTarget {
+    pub user: String,
+    pub host: String,
+    pub port: u16,
+}
+
+impl QuickTarget {
+    /// Parse `user@host`, `user@host:port` or `user@[v6addr]:port`. `None` when it is not one.
+    pub fn parse(input: &str) -> Option<Self> {
+        let input = input.trim();
+        let (user, rest) = input.split_once('@')?;
+        let (host, port) = if let Some(v6) = rest.strip_prefix('[') {
+            let (addr, tail) = v6.split_once(']')?;
+            let port = match tail.strip_prefix(':') {
+                Some(p) => p.parse().ok()?,
+                None if tail.is_empty() => 22,
+                None => return None,
+            };
+            (addr, port)
+        } else {
+            match rest.rsplit_once(':') {
+                Some((h, p)) => (h, p.parse().ok()?),
+                None => (rest, 22),
+            }
+        };
+        tern_core::validate_username(user).ok()?;
+        tern_core::validate_hostname(host).ok()?;
+        tern_core::validate_port(port).ok()?;
+        Some(Self {
+            user: user.to_owned(),
+            host: host.to_owned(),
+            port,
+        })
+    }
+
+    pub fn display(&self) -> String {
+        if self.port == 22 {
+            format!("{}@{}", self.user, self.host)
+        } else {
+            format!("{}@{}:{}", self.user, self.host, self.port)
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -48,11 +98,15 @@ pub struct Palette {
     results: Vec<usize>,
     /// Most recent first.
     recent: Vec<String>,
+    /// Host picker (`Ctrl+Shift+O`): typed `user@host:port` strings offer quick connect.
+    hosts_only: bool,
+    hosts: Vec<HostRef>,
 }
 
 /// A saved host as offered by the palette's connect entries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostRef {
+    pub id: String,
     pub label: String,
     /// Extra searchable text (address, tags, group), shown dimmed after the label.
     pub detail: String,
@@ -64,6 +118,8 @@ impl Palette {
         self.open(&Keymap::defaults(), hosts);
         self.entries
             .retain(|e| matches!(e.target, Target::Connect(_)));
+        self.hosts_only = true;
+        self.hosts = hosts.to_vec();
         self.refresh();
     }
 
@@ -78,6 +134,7 @@ impl Palette {
 
     /// Rebuild the entry list and reset the query. Called each time the palette opens.
     pub fn open(&mut self, keymap: &Keymap, hosts: &[HostRef]) {
+        self.hosts_only = false;
         self.query.clear();
         self.selected = 0;
         self.entries = Action::ALL
@@ -106,7 +163,7 @@ impl Palette {
                 } else {
                     format!("Connect: {}  {}", h.label, h.detail)
                 },
-                target: Target::Connect(h.label.clone()),
+                target: Target::Connect(h.id.clone()),
                 keys: String::new(),
                 recent_key: format!("host:{}", h.label),
             }))
@@ -117,7 +174,35 @@ impl Palette {
     pub fn set_query(&mut self, query: String) {
         self.query = query;
         self.selected = 0;
+        self.entries
+            .retain(|e| !matches!(e.target, Target::Quick(_) | Target::SaveQuick(_)));
+        if self.hosts_only
+            && let Some(q) = QuickTarget::parse(&self.query)
+            && !self.hosts.iter().any(|h| h.label == q.host)
+        {
+            let shown = q.display();
+            self.entries.push(Entry {
+                title: format!("Connect to {shown}"),
+                target: Target::Quick(q.clone()),
+                keys: String::new(),
+                recent_key: format!("quick:{shown}"),
+            });
+            self.entries.push(Entry {
+                title: format!("Save as new host: {shown}"),
+                target: Target::SaveQuick(q),
+                keys: String::new(),
+                recent_key: format!("save:{shown}"),
+            });
+        }
         self.refresh();
+        // The typed address is the most likely intent: show its entries first.
+        let n = self.entries.len();
+        if self.hosts_only && n >= 2 && matches!(self.entries[n - 2].target, Target::Quick(_)) {
+            self.results.retain(|&i| i < n - 2);
+            self.results.insert(0, n - 1);
+            self.results.insert(0, n - 2);
+            self.results.truncate(MAX_RESULTS);
+        }
     }
 
     pub fn move_selection(&mut self, delta: isize) {
@@ -285,6 +370,7 @@ mod tests {
     #[test]
     fn fuzzy_matches_hosts() {
         let host = |l: &str| HostRef {
+            id: l.to_owned(),
             label: l.to_owned(),
             detail: String::new(),
         };
@@ -294,6 +380,46 @@ mod tests {
         assert_eq!(top(&p), Some("Connect: prod-db"));
         p.set_query("pdb".into());
         assert_eq!(top(&p), Some("Connect: prod-db"));
+    }
+
+    #[test]
+    fn parses_quick_connect_strings() {
+        let q = |s| QuickTarget::parse(s);
+        assert_eq!(
+            q("root@10.0.0.5"),
+            Some(QuickTarget {
+                user: "root".into(),
+                host: "10.0.0.5".into(),
+                port: 22
+            })
+        );
+        assert_eq!(q("me@example.com:2200").map(|t| t.port), Some(2200));
+        assert_eq!(
+            q("me@[::1]:2200").map(|t| (t.host, t.port)),
+            Some(("::1".into(), 2200))
+        );
+        assert_eq!(q("example.com"), None);
+        assert_eq!(q("me@"), None);
+        assert_eq!(q("me@host:notaport"), None);
+        assert_eq!(q("me@host:0"), None);
+        assert_eq!(q("@host"), None);
+    }
+
+    #[test]
+    fn host_picker_offers_quick_connect_and_save() {
+        let mut p = Palette::default();
+        p.open_hosts(&[]);
+        p.set_query("alice@db.example.com:2222".into());
+        let titles: Vec<_> = p.results().map(|e| e.title.clone()).collect();
+        assert_eq!(titles[0], "Connect to alice@db.example.com:2222");
+        assert_eq!(titles[1], "Save as new host: alice@db.example.com:2222");
+        // Typing something else removes them again.
+        p.set_query("alice".into());
+        assert!(p.results().next().is_none());
+        // The full palette never offers them.
+        let mut full = open(&[]);
+        full.set_query("alice@db.example.com".into());
+        assert!(!full.results().any(|e| matches!(e.target, Target::Quick(_))));
     }
 
     #[test]
@@ -357,6 +483,7 @@ mod tests {
     fn five_hundred_hosts_open_and_search_quickly() {
         let hosts: Vec<HostRef> = (0..500)
             .map(|i| HostRef {
+                id: i.to_string(),
                 label: format!("server-{i:03}.example.com"),
                 detail: String::new(),
             })

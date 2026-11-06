@@ -7,7 +7,9 @@ Full plan lives in `docs/` — read `docs/README.md`, `docs/ARCHITECTURE.md`, `d
 
 ## Current status
 
-Sprint 0, 1 and 2 are done (S0-T03 CI was skipped by the user). Do not write code for later sprints until the user starts the next one (`docs/sprints/sprint-03-hosts-and-credentials.md`).
+Sprint 0–3 are done (S0-T03 CI was skipped by the user). Sprint 4 (SSH engine) is implemented (S4-T01..T07); see `docs/sprints/sprint-04-ssh-engine.md`. Do not write code for later sprints until the user starts the next one (`docs/sprints/sprint-05-terminal.md`).
+
+Sprint 4: `tern-ssh` has `session.rs` (`spawn(ConnectParams, Arc<dyn KnownHostsStore>)` → `SessionHandle` + event `Receiver`; auth key → password → keyboard-interactive; output coalesced ~16 ms/64 KiB) and `known_hosts.rs` (verdict policy + store trait). `tern-app/src/sessions.rs` holds the single `SessionView`, credential `resolve`, `AppKnownHosts`, the raw log and the iced subscription. `Pane::Tab`/real tabs are still Sprint 5. Live tests: `crates/tern-ssh/tests/live.rs`, skipped unless `TERN_SSH_TEST_ADDR=host:port TERN_SSH_TEST_USER=… TERN_SSH_TEST_PASSWORD=…` are set (e.g. `docker run -d -p 127.0.0.1:2222:2222 -e PASSWORD_ACCESS=true -e USER_NAME=tern -e USER_PASSWORD=ternpass lscr.io/linuxserver/openssh-server`). russh 0.65's `check_server_key` takes `russh::keys::PublicKeyOrCertificate` (re-exported there, not in `russh::cert`).
 
 Sprint 2 app modules (`crates/tern-app/src`): `action.rs` (one-table action registry; add an action there), `keymap.rs` (chords, sequences, mode-aware matcher, overrides from `settings`), `list.rs` (keyboard list model + view), `palette.rs`, `modal.rs` (stack; also hosts the cheat sheet), `cheatsheet.rs`, `toast.rs`. `State::dispatch` is the single entry for keymap and palette. List data is still dummy (`list::dummy_items`) until Sprint 3.
 - `tern-vault`: Argon2id KEK (128 MiB/8 passes, ~420 ms), XChaCha20-Poly1305 `seal/open`, `Vault` envelope (create/unlock/change_password/lock).

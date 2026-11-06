@@ -20,6 +20,7 @@ use crate::modal::{self, Modal, ModalStack, Pending};
 use crate::palette::{self, HostRef, Palette, Target};
 use crate::prompt::{self, Prompt, PromptKind, PromptOutcome};
 use crate::reauth::{self, Gate, ReauthPrompt, SensitiveOp};
+use crate::sessions::{self, AppKnownHosts, ConnTarget, Phase, SessionId, SessionView, Spawned};
 use crate::toast::{ToastKind, Toasts};
 
 /// Which part of the app owns the keyboard. See `docs/KEYBINDINGS.md`.
@@ -126,6 +127,9 @@ pub struct State {
     revealed: Option<(String, Sensitive)>,
     prompt: Option<Prompt>,
     palette: Palette,
+    /// The one open SSH session (tabs arrive in Sprint 5).
+    session: Option<SessionView>,
+    next_session: SessionId,
 }
 
 /// Settings read from the `settings` table after unlocking.
@@ -202,6 +206,14 @@ pub enum Message {
     PromptSubmit,
     /// A group/move operation finished; the string is a toast message.
     GroupsChanged(Result<String, String>),
+    /// The session task for this id started (or could not, e.g. no username).
+    SessionSpawned(SessionId, Result<Spawned, String>),
+    /// An event from the session actor.
+    Session(SessionId, tern_ssh::SessionEvent),
+    SessionInput(Sensitive),
+    /// Enter in the session input line.
+    SessionSubmit,
+    SessionTouched(Result<(), String>),
 }
 
 impl State {
@@ -239,6 +251,8 @@ impl State {
             revealed: None,
             prompt: None,
             palette: Palette::default(),
+            session: None,
+            next_session: 0,
         };
         (state, check)
     }
@@ -563,6 +577,8 @@ impl State {
             Message::HostSaved(Err(e)) => {
                 if let Some(form) = &mut self.host_form {
                     form.error = Some(format!("Could not save: {e}"));
+                } else {
+                    self.toast(ToastKind::Error, format!("Could not save: {e}"));
                 }
                 Task::none()
             }
@@ -598,7 +614,23 @@ impl State {
                 self.ids_data = IdentitiesData::default();
                 self.keys_data = KeysData::default();
                 self.modals.clear();
+                self.close_session();
                 iced::widget::operation::focus(PASSWORD_ID)
+            }
+            Message::SessionSpawned(id, result) => self.on_session_spawned(id, result),
+            Message::Session(id, event) => self.on_session_event(id, event),
+            Message::SessionInput(v) => {
+                if let Some(s) = &mut self.session {
+                    s.input = v;
+                }
+                Task::none()
+            }
+            Message::SessionSubmit => self.submit_session_input(),
+            Message::SessionTouched(result) => {
+                if let Err(e) = result {
+                    tracing::warn!(error = %e, "could not record last connection time");
+                }
+                Task::none()
             }
         }
     }
@@ -610,6 +642,22 @@ impl State {
             return Task::none();
         }
         tracing::debug!(action = action.meta().id, "dispatch");
+        if self.session.is_some()
+            && !matches!(
+                action,
+                Action::Back
+                    | Action::Open
+                    | Action::CloseTab
+                    | Action::Reconnect
+                    | Action::Confirm
+                    | Action::Cancel
+                    | Action::ReplaceHostKey
+                    | Action::CheatSheet
+                    | Action::LockVault
+            )
+        {
+            return Task::none();
+        }
         // A revealed password must not follow the selection around.
         if self.revealed.is_some()
             && (action.section().is_some()
@@ -858,14 +906,65 @@ impl State {
                 self.sync_modal_mode();
                 Task::none()
             }
-            Action::Confirm | Action::Cancel => {
+            Action::Confirm | Action::Cancel | Action::ReplaceHostKey => {
                 let modal = self.modals.pop();
                 self.sync_modal_mode();
                 match (action, modal) {
                     (Action::Confirm, Some(Modal::Confirm { then, .. })) => self.run_pending(then),
+                    (
+                        Action::Confirm | Action::Cancel | Action::ReplaceHostKey,
+                        Some(modal @ Modal::HostKey { .. }),
+                    ) => self.decide_host_key(action, modal),
                     _ => Task::none(),
                 }
             }
+            Action::Open if self.session.is_some() => {
+                let Some(s) = &self.session else {
+                    return Task::none();
+                };
+                if s.accepts_input() {
+                    self.mode = Mode::Insert;
+                    self.matcher.reset();
+                    return iced::widget::operation::focus(sessions::SESSION_INPUT_ID);
+                }
+                Task::none()
+            }
+            Action::Open if self.section == Section::Hosts => {
+                let Some(item) = self.list().selected_item() else {
+                    return Task::none();
+                };
+                match (item.group, item.id.clone()) {
+                    (Some(expanded), _) => {
+                        if expanded {
+                            self.list_mut().collapse();
+                        } else {
+                            self.list_mut().expand();
+                        }
+                        self.scroll_list(false)
+                    }
+                    (None, Some(id)) => self.start_session(ConnTarget::Saved(id)),
+                    (None, None) => Task::none(),
+                }
+            }
+            Action::CloseTab => {
+                if self.session.is_some() {
+                    self.close_session();
+                    return self.leave_insert();
+                }
+                Task::none()
+            }
+            Action::Reconnect => match &self.session {
+                Some(s) if !s.is_live() => {
+                    let target = s.target.clone();
+                    self.session = None;
+                    self.start_session(target)
+                }
+                Some(_) => Task::none(),
+                None => {
+                    self.toast(ToastKind::Info, "No session to reconnect");
+                    Task::none()
+                }
+            },
             Action::Filter => {
                 self.mode = Mode::Insert;
                 self.pane = Pane::List;
@@ -940,6 +1039,7 @@ impl State {
             }
             Action::PaletteRun => self.run_palette_selection(),
             Action::LockVault => {
+                self.close_session();
                 let store = self.store.clone();
                 Task::perform(async move { store.lock().await }, |r| {
                     Message::Locked(r.map_err(|e| e.to_string()))
@@ -981,11 +1081,21 @@ impl State {
             }
             return Task::none();
         }
+        if self.session.is_some() && self.modals.is_empty() {
+            if self.mode == Mode::Insert {
+                return self.leave_insert();
+            }
+            self.close_session();
+            return Task::none();
+        }
         match self.mode {
             Mode::Modal => {
-                self.modals.pop();
+                let modal = self.modals.pop();
                 self.sync_modal_mode();
-                Task::none()
+                match modal {
+                    Some(m @ Modal::HostKey { .. }) => self.decide_host_key(Action::Cancel, m),
+                    _ => Task::none(),
+                }
             }
             Mode::Palette => {
                 self.mode = Mode::Normal;
@@ -1027,15 +1137,235 @@ impl State {
         };
         let run = match entry.target {
             Target::Action(action) => self.dispatch(action),
-            Target::Connect(label) => {
-                self.toast(
-                    ToastKind::Info,
-                    format!("Connecting to '{label}' arrives with the SSH engine"),
-                );
-                Task::none()
-            }
+            Target::Connect(host_id) => self.start_session(ConnTarget::Saved(host_id)),
+            Target::Quick(q) => self.start_session(ConnTarget::Quick(q)),
+            Target::SaveQuick(q) => self.save_quick_host(q),
         };
         Task::batch([save, run])
+    }
+
+    /// Begin connecting to a saved host: resolve credentials, start the session actor.
+    fn start_session(&mut self, target: ConnTarget) -> Task<Message> {
+        if self.session.is_some() {
+            self.toast(
+                ToastKind::Info,
+                "A session is already open; close it first (Ctrl+Shift+W)",
+            );
+            return Task::none();
+        }
+        let label = match &target {
+            ConnTarget::Saved(host_id) => self
+                .host_data
+                .host(host_id)
+                .map(|h| h.label.clone())
+                .unwrap_or_else(|| host_id.clone()),
+            ConnTarget::Quick(q) => q.display(),
+        };
+        self.next_session += 1;
+        let id = self.next_session;
+        self.session = Some(SessionView::new(id, target.clone(), label));
+        self.mode = Mode::Normal;
+        self.matcher.reset();
+        let store = self.store.clone();
+        Task::perform(
+            async move {
+                let params = sessions::resolve(&store, &target).await?;
+                let known = std::sync::Arc::new(AppKnownHosts(store));
+                let (handle, rx) = tern_ssh::spawn(params, known);
+                Ok(Spawned {
+                    handle,
+                    source: sessions::EventSource::new(id, rx),
+                })
+            },
+            move |r| Message::SessionSpawned(id, r),
+        )
+    }
+
+    fn on_session_spawned(
+        &mut self,
+        id: SessionId,
+        result: Result<Spawned, String>,
+    ) -> Task<Message> {
+        match result {
+            Ok(spawned) => match &mut self.session {
+                Some(s) if s.id == id => {
+                    s.handle = Some(spawned.handle);
+                    s.source = Some(spawned.source);
+                }
+                // Closed while starting: stop the orphaned actor.
+                _ => {
+                    spawned.handle.try_send(tern_ssh::SessionCommand::Close);
+                }
+            },
+            Err(e) => {
+                if self.session.as_ref().is_some_and(|s| s.id == id) {
+                    self.session = None;
+                    self.toast(ToastKind::Error, e);
+                }
+            }
+        }
+        Task::none()
+    }
+
+    fn on_session_event(&mut self, id: SessionId, event: tern_ssh::SessionEvent) -> Task<Message> {
+        use tern_ssh::SessionEvent as E;
+        let Some(s) = self.session.as_mut().filter(|s| s.id == id) else {
+            return Task::none();
+        };
+        match event {
+            E::Connecting => s.phase = Phase::Connecting,
+            E::HostKeyPrompt {
+                host,
+                port,
+                key_type,
+                fingerprint,
+                changed_from,
+            } => {
+                s.phase = Phase::HostKey;
+                self.modals.push(Modal::HostKey {
+                    host,
+                    port,
+                    key_type,
+                    fingerprint,
+                    changed_from,
+                });
+                self.sync_modal_mode();
+            }
+            E::AuthPrompt {
+                name,
+                instructions,
+                prompts,
+            } => {
+                s.begin_auth(name, instructions, prompts);
+                self.mode = Mode::Insert;
+                self.matcher.reset();
+                return iced::widget::operation::focus(sessions::SESSION_INPUT_ID);
+            }
+            E::Connected => {
+                s.phase = Phase::Connected;
+                s.log.note("Connected.");
+                self.mode = Mode::Insert;
+                self.matcher.reset();
+                let host_id = match &s.target {
+                    ConnTarget::Saved(id) => id.parse::<tern_core::HostId>().ok(),
+                    ConnTarget::Quick(_) => None,
+                };
+                let focus = iced::widget::operation::focus(sessions::SESSION_INPUT_ID);
+                let Some(host_id) = host_id else {
+                    return focus;
+                };
+                let store = self.store.clone();
+                let touch = Task::perform(
+                    async move { store.touch_last_connected(host_id).await },
+                    |r| Message::SessionTouched(r.map_err(|e| e.to_string())),
+                );
+                let reload = self.reload_hosts();
+                return Task::batch([focus, touch.chain(reload)]);
+            }
+            E::Output(bytes) => s.log.push_bytes(&bytes),
+            E::Exited(_) | E::Closed => {
+                s.log.note("[connection closed]");
+                s.finish(None);
+                self.end_session_ui();
+            }
+            E::Error(e) => {
+                let host = match &s.target {
+                    ConnTarget::Saved(id) => self.host_data.host(id).map(|h| h.hostname.clone()),
+                    ConnTarget::Quick(q) => Some(q.host.clone()),
+                }
+                .unwrap_or_else(|| s.label.clone());
+                let msg = sessions::friendly_error(&e, &host);
+                s.log.note(&format!("[{msg}]"));
+                s.finish(Some(msg));
+                self.end_session_ui();
+            }
+        }
+        Task::none()
+    }
+
+    /// After a session ends: drop any pending host-key modal and leave Insert mode.
+    fn end_session_ui(&mut self) {
+        self.modals.clear();
+        self.mode = Mode::Normal;
+        self.matcher.reset();
+    }
+
+    fn submit_session_input(&mut self) -> Task<Message> {
+        let Some(s) = &mut self.session else {
+            return Task::none();
+        };
+        let Some(handle) = s.handle.clone() else {
+            return Task::none();
+        };
+        match s.phase {
+            Phase::Connected => {
+                let mut line = s.input.as_str().to_owned();
+                s.input.clear();
+                line.push('\n');
+                handle.try_send(tern_ssh::SessionCommand::Write(line.into()));
+            }
+            Phase::Auth { .. } => {
+                if let Some(answers) = s.answer() {
+                    handle.try_send(tern_ssh::SessionCommand::AuthResponse(answers));
+                }
+            }
+            _ => {}
+        }
+        Task::none()
+    }
+
+    /// Send the user's host-key decision to the actor.
+    fn decide_host_key(&mut self, action: Action, modal: Modal) -> Task<Message> {
+        let Modal::HostKey { changed_from, .. } = &modal else {
+            return Task::none();
+        };
+        let accept = match (action, changed_from.is_some()) {
+            (Action::Confirm, false) | (Action::ReplaceHostKey, true) => true,
+            (Action::Cancel, _) => false,
+            // Enter/y on a changed key (or Shift+R on a new one) must not decide: keep the dialog.
+            _ => {
+                self.modals.push(modal);
+                self.sync_modal_mode();
+                return Task::none();
+            }
+        };
+        if let Some(s) = &mut self.session {
+            if let Some(h) = &s.handle {
+                h.try_send(tern_ssh::SessionCommand::HostKeyDecision(accept));
+            }
+            if accept {
+                s.phase = Phase::Connecting;
+            }
+        }
+        Task::none()
+    }
+
+    /// Save a typed `user@host:port` as a new host (S4-T07).
+    fn save_quick_host(&mut self, q: palette::QuickTarget) -> Task<Message> {
+        let mut host = tern_core::Host::new(q.host.clone(), q.host.clone());
+        host.port = q.port;
+        host.username = Some(q.user.clone());
+        let label = host.label.clone();
+        let store = self.store.clone();
+        Task::perform(
+            async move {
+                store.insert_host(host).await.map_err(|e| e.to_string())?;
+                Ok(label)
+            },
+            Message::HostSaved,
+        )
+    }
+
+    /// Disconnect and drop the session, if any.
+    fn close_session(&mut self) {
+        if let Some(s) = self.session.take()
+            && let Some(h) = s.handle
+        {
+            h.try_send(tern_ssh::SessionCommand::Close);
+        }
+        self.modals.clear();
+        self.mode = Mode::Normal;
+        self.matcher.reset();
     }
 
     fn sync_modal_mode(&mut self) {
@@ -1754,6 +2084,13 @@ impl State {
             .style(container::bordered_box);
 
         let base = column![row![sidebar, list_pane, detail].height(Fill), status_bar];
+        if let Some(s) = &self.session {
+            let session = sessions::view(s, self.form.spinner_frame);
+            return match self.modals.top() {
+                Some(m) => iced::widget::stack![session, modal::view(m, &self.keymap)].into(),
+                None => session,
+            };
+        }
         if let Some(form) = &self.host_form {
             return iced::widget::stack![base, host_form::view(form)].into();
         }
@@ -1788,6 +2125,17 @@ impl State {
                 iced::time::every(std::time::Duration::from_millis(120))
                     .map(|_| Message::SpinnerTick),
             );
+        }
+        if let Some(s) = &self.session {
+            if let Some(src) = &s.source {
+                subs.push(sessions::subscription(src));
+            }
+            if matches!(s.phase, Phase::Connecting) {
+                subs.push(
+                    iced::time::every(std::time::Duration::from_millis(120))
+                        .map(|_| Message::SpinnerTick),
+                );
+            }
         }
         if !self.toasts.is_empty() {
             subs.push(
@@ -2071,7 +2419,96 @@ mod tests {
         let _ = s.update(Message::PaletteQueryChanged("prod-db".into()));
         let _ = s.update(Message::Dispatch(Action::PaletteRun));
         assert_eq!(s.mode, Mode::Normal);
-        assert!(s.toasts.current().is_some());
+        let session = s.session.as_ref().expect("session started");
+        assert_eq!(session.label, "prod-db");
+        assert_eq!(session.phase, Phase::Connecting);
+    }
+
+    fn with_session() -> State {
+        let mut s = main_state();
+        let host = tern_core::Host::new("web", "web.example.com");
+        let id = host.id.to_string();
+        let _ = s.update(Message::HostsLoaded(Ok(HostsData {
+            hosts: vec![host],
+            ..HostsData::default()
+        })));
+        let _ = s.start_session(ConnTarget::Saved(id));
+        s
+    }
+
+    fn host_key(changed_from: Option<&str>) -> Message {
+        Message::Session(
+            1,
+            tern_ssh::SessionEvent::HostKeyPrompt {
+                host: "web.example.com".into(),
+                port: 22,
+                key_type: "ssh-ed25519".into(),
+                fingerprint: "SHA256:new".into(),
+                changed_from: changed_from.map(str::to_owned),
+            },
+        )
+    }
+
+    #[test]
+    fn unknown_host_key_is_trusted_with_confirm() {
+        let mut s = with_session();
+        let _ = s.update(host_key(None));
+        assert_eq!(s.mode, Mode::Modal);
+        assert!(matches!(s.modals.top(), Some(Modal::HostKey { .. })));
+        let _ = s.update(Message::Dispatch(Action::Confirm));
+        assert!(s.modals.is_empty());
+        assert_eq!(s.mode, Mode::Normal);
+        assert_eq!(
+            s.session.as_ref().map(|x| &x.phase),
+            Some(&Phase::Connecting)
+        );
+    }
+
+    #[test]
+    fn changed_host_key_needs_the_explicit_replace_action() {
+        let mut s = with_session();
+        let _ = s.update(host_key(Some("SHA256:old")));
+        // Enter / y must not trust a changed key.
+        let _ = s.update(Message::Dispatch(Action::Confirm));
+        assert!(matches!(s.modals.top(), Some(Modal::HostKey { .. })));
+        assert_eq!(s.mode, Mode::Modal);
+        let _ = s.update(Message::Dispatch(Action::ReplaceHostKey));
+        assert!(s.modals.is_empty());
+    }
+
+    #[test]
+    fn rejecting_a_host_key_via_esc_closes_the_dialog() {
+        let mut s = with_session();
+        let _ = s.update(host_key(None));
+        let _ = s.update(Message::Dispatch(Action::Back));
+        assert!(s.modals.is_empty());
+        assert!(s.session.is_some());
+    }
+
+    #[test]
+    fn errors_end_the_session_and_reconnect_starts_a_new_one() {
+        let mut s = with_session();
+        let _ = s.update(Message::Session(
+            1,
+            tern_ssh::SessionEvent::Error(tern_ssh::Error::Refused),
+        ));
+        let session = s.session.as_ref().expect("kept for reconnect");
+        assert!(matches!(&session.phase, Phase::Disconnected(Some(m)) if m.contains("refused")));
+        // Events from a stale session id are ignored.
+        let _ = s.update(Message::Session(99, tern_ssh::SessionEvent::Connected));
+        let _ = s.update(Message::Dispatch(Action::Reconnect));
+        let session = s.session.as_ref().expect("new session");
+        assert_eq!(session.id, 2);
+        assert_eq!(session.phase, Phase::Connecting);
+    }
+
+    #[test]
+    fn list_actions_are_ignored_while_a_session_is_open() {
+        let mut s = with_session();
+        let _ = s.update(Message::Dispatch(Action::GoKeys));
+        assert_eq!(s.section, Section::Hosts);
+        let _ = s.update(Message::Dispatch(Action::Back));
+        assert!(s.session.is_none(), "Esc in normal mode closes the session");
     }
 
     #[test]

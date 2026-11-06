@@ -190,3 +190,62 @@ async fn refused_connection_reports_refused() {
         }
     }
 }
+
+#[tokio::test]
+async fn large_output_is_coalesced_into_few_events() {
+    let Some(e) = env() else { return };
+    let (h, mut rx) = spawn(params(&e, &e.password), Arc::new(MemKnown::default()));
+    let (mut bytes, mut events) = (0usize, 0usize);
+    loop {
+        match next(&mut rx).await {
+            SessionEvent::HostKeyPrompt { .. } => {
+                h.send(SessionCommand::HostKeyDecision(true)).await;
+            }
+            SessionEvent::Connected => {
+                h.send(SessionCommand::Write(
+                    "head -c 30000000 /dev/zero | tr '\\0' 'y'; echo; echo END-MARK; exit\n".into(),
+                ))
+                .await;
+            }
+            SessionEvent::Output(b) => {
+                bytes += b.len();
+                events += 1;
+            }
+            SessionEvent::Exited(_) | SessionEvent::Closed => break,
+            SessionEvent::Error(err) => panic!("{err}"),
+            _ => {}
+        }
+    }
+    assert!(bytes >= 30_000_000, "got {bytes} bytes");
+    // 64 KiB flush threshold or 16 ms ticks: far fewer events than SSH packets (32 KiB max).
+    assert!(
+        events * 16 * 1024 < bytes,
+        "{events} events for {bytes} bytes"
+    );
+}
+
+/// Manual check: `TERN_SSH_KILL_TEST=1`, then stop the server while this waits.
+#[tokio::test]
+async fn server_death_ends_the_session_cleanly() {
+    let Some(e) = env() else { return };
+    if std::env::var("TERN_SSH_KILL_TEST").is_err() {
+        return;
+    }
+    let (h, mut rx) = spawn(params(&e, &e.password), Arc::new(MemKnown::default()));
+    loop {
+        let ev = tokio::time::timeout(Duration::from_secs(60), rx.recv())
+            .await
+            .expect("no event within 60 s of the server dying");
+        match ev {
+            Some(SessionEvent::HostKeyPrompt { .. }) => {
+                h.send(SessionCommand::HostKeyDecision(true)).await;
+            }
+            Some(SessionEvent::Connected) => println!("READY"),
+            Some(SessionEvent::Closed | SessionEvent::Error(_) | SessionEvent::Exited(_)) => {
+                break;
+            }
+            Some(_) => {}
+            None => panic!("stream ended without a final event"),
+        }
+    }
+}

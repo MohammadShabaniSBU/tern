@@ -153,6 +153,7 @@ impl HostsData {
                     detail.push_str(&format!("  [{g}]"));
                 }
                 HostRef {
+                    id: h.id.to_string(),
                     label: h.label.clone(),
                     detail,
                 }

@@ -35,6 +35,19 @@ A remote shell needs `Ctrl+A`, `Ctrl+W`, `Ctrl+K`, etc. So while a terminal is f
 | `Ctrl+,` | Settings |
 | `F1` / `?` (Normal) | Keybinding cheat sheet |
 
+### SSH session (Sprint 4; a single session until tabs arrive in Sprint 5)
+
+| Keys | Action |
+|---|---|
+| `Ctrl+Shift+O`, then `user@host[:port]` | Connect without saving, or "Save as new host" |
+| `y` / `Enter` | Host-key dialog, first connection: trust and save |
+| `n` / `Esc` | Host-key dialog: abort |
+| `Shift+R` | Host-key dialog, **changed** key: replace the stored key (`y`/`Enter` do nothing here) |
+| `Enter` (Normal) | Focus the input line |
+| `Esc` | Leave the input line; `Esc` again closes the session |
+| `r` (Normal, disconnected) | Reconnect |
+| `Ctrl+Shift+W` | Disconnect and close |
+
 ### Normal mode — lists (hosts, keys, identities, tunnels)
 
 | Keys | Action |

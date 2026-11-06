@@ -182,12 +182,14 @@ actions! {
     // Modal dialogs
     Confirm      => "modal.confirm",  "Confirm dialog",        General, ["y", "enter"], ModeMask::MODAL;
     Cancel       => "modal.cancel",   "Cancel dialog",         General, ["n"], ModeMask::MODAL;
+    ReplaceHostKey => "hostkey.replace", "Trust the changed host key (only after verifying it)", General, ["shift+r"], ModeMask::MODAL;
     // Tabs
     QuickConnect => "tab.quick_connect", "Quick connect",      Tabs, ["ctrl+shift+o"], G;
     NewTab       => "tab.new",        "New tab from host picker", Tabs, ["ctrl+shift+t"], G;
     CloseTab     => "tab.close",      "Close current tab",     Tabs, ["ctrl+shift+w"], G;
     NextTab      => "tab.next",       "Next tab",              Tabs, ["ctrl+tab"], G;
     PrevTab      => "tab.prev",       "Previous tab",          Tabs, ["ctrl+shift+tab"], G;
+    Reconnect    => "session.reconnect", "Reconnect disconnected session", Tabs, ["r"], N;
     // Vault
     LockVault    => "vault.lock",     "Lock vault",            Vault, ["ctrl+shift+l"], G;
 }

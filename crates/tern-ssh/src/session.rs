@@ -107,7 +107,7 @@ pub enum SessionEvent {
 }
 
 /// Cheap handle for sending commands to a running session.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct SessionHandle {
     tx: mpsc::Sender<SessionCommand>,
 }

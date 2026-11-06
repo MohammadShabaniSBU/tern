@@ -15,6 +15,7 @@ mod palette;
 mod paths;
 mod prompt;
 mod reauth;
+mod sessions;
 mod toast;
 
 use app::State;
