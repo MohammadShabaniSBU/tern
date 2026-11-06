@@ -4429,10 +4429,15 @@ dependencies = [
 name = "tern-io"
 version = "0.1.0"
 dependencies = [
+ "base64",
+ "secrecy",
+ "serde",
+ "serde_json",
  "tern-core",
  "tern-store",
  "tern-vault",
  "thiserror 2.0.21",
+ "zeroize",
 ]
 
 [[package]]
