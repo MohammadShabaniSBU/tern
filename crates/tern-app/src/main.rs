@@ -4,6 +4,7 @@ mod auth;
 mod keymap;
 mod list;
 mod logging;
+mod modal;
 mod paths;
 
 use app::State;

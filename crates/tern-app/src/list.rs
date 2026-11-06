@@ -156,6 +156,16 @@ impl ListState {
         }
     }
 
+    /// Remove the selected item (and a group's children). Returns its label.
+    pub fn remove_selected(&mut self) -> Option<String> {
+        self.selected_item()?;
+        let end = self.subtree_end(self.selected);
+        let label = self.items[self.selected].label.clone();
+        self.items.drain(self.selected..end);
+        self.refresh();
+        Some(label)
+    }
+
     pub fn set_filter(&mut self, filter: String) {
         self.filter = filter;
         self.refresh();
@@ -489,6 +499,19 @@ mod tests {
         l.last();
         let o = l.reveal_offset().expect("must scroll");
         assert_eq!(o, 1000.0 * ROW_H - l.viewport_h);
+    }
+
+    #[test]
+    fn removing_a_group_removes_its_children_and_keeps_a_selection() {
+        let mut l = tree();
+        assert_eq!(l.remove_selected().as_deref(), Some("prod"));
+        assert_eq!(sel(&l), "staging");
+        assert!(!labels(&l).contains(&"prod-db"));
+        l.last();
+        l.remove_selected();
+        assert_eq!(sel(&l), "dev-vm");
+        let mut empty = ListState::new(Vec::new());
+        assert_eq!(empty.remove_selected(), None);
     }
 
     #[test]

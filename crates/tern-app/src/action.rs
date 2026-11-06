@@ -160,6 +160,9 @@ actions! {
     Delete       => "item.delete",    "Delete selected",       List, ["d d"], N;
     Duplicate    => "item.duplicate", "Duplicate selected",    List, ["y"], N;
     ToggleTunnels => "item.tunnels",  "Start/stop host tunnels", List, ["t"], N;
+    // Modal dialogs
+    Confirm      => "modal.confirm",  "Confirm dialog",        General, ["y", "enter"], ModeMask::MODAL;
+    Cancel       => "modal.cancel",   "Cancel dialog",         General, ["n"], ModeMask::MODAL;
     // Tabs
     QuickConnect => "tab.quick_connect", "Quick connect",      Tabs, ["ctrl+shift+o"], G;
     NewTab       => "tab.new",        "New tab from host picker", Tabs, ["ctrl+shift+t"], G;

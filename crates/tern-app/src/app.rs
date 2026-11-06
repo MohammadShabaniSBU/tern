@@ -11,6 +11,7 @@ use crate::action::{Action, Section};
 use crate::auth::{self, AuthFailure, AuthForm, CONFIRM_ID, PASSWORD_ID, Sensitive, retry_delay};
 use crate::keymap::{self, Chord, Context, Keymap, Matcher, Outcome};
 use crate::list::{self, ListState};
+use crate::modal::{self, Modal, ModalStack, Pending};
 
 /// Which part of the app owns the keyboard. See `docs/KEYBINDINGS.md`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -21,7 +22,6 @@ pub enum Mode {
     Insert,
     Palette,
     /// A modal dialog owns the keyboard.
-    #[allow(dead_code)] // constructed by the modal stack (S2-T06)
     Modal,
 }
 
@@ -94,6 +94,7 @@ pub struct State {
     pub section: Section,
     pub pane: Pane,
     lists: [ListState; 4],
+    modals: ModalStack,
     form: AuthForm,
     keymap: Keymap,
     matcher: Matcher,
@@ -145,6 +146,7 @@ impl State {
             mode: Mode::Normal,
             section: Section::default(),
             pane: Pane::default(),
+            modals: ModalStack::default(),
             lists: Section::ALL.map(|sec| ListState::new(list::dummy_items(sec))),
             form: AuthForm::default(),
             keymap: Keymap::defaults(),
@@ -263,6 +265,7 @@ impl State {
                 self.screen = Screen::Unlock;
                 self.mode = Mode::Normal;
                 self.host_count = None;
+                self.modals.clear();
                 iced::widget::operation::focus(PASSWORD_ID)
             }
         }
@@ -281,6 +284,30 @@ impl State {
         }
         match action {
             Action::Back => self.back(),
+            Action::Delete => {
+                if let Some(item) = self.list().selected_item() {
+                    let body = if item.group.is_some() {
+                        format!("Delete group '{}' and everything in it?", item.label)
+                    } else {
+                        format!("Delete '{}'?", item.label)
+                    };
+                    self.modals.push(Modal::Confirm {
+                        title: "Confirm delete".into(),
+                        body,
+                        then: Pending::DeleteSelected,
+                    });
+                    self.mode = Mode::Modal;
+                }
+                Task::none()
+            }
+            Action::Confirm | Action::Cancel => {
+                let modal = self.modals.pop();
+                self.sync_modal_mode();
+                match (action, modal) {
+                    (Action::Confirm, Some(Modal::Confirm { then, .. })) => self.run_pending(then),
+                    _ => Task::none(),
+                }
+            }
             Action::Filter => {
                 self.mode = Mode::Insert;
                 self.pane = Pane::List;
@@ -348,8 +375,12 @@ impl State {
     /// `Esc`: move one step outwards. Modal -> palette -> insert -> clear the filter.
     fn back(&mut self) -> Task<Message> {
         match self.mode {
-            // The modal stack (S2-T06) pops one modal here before leaving Modal mode.
-            Mode::Modal | Mode::Palette => {
+            Mode::Modal => {
+                self.modals.pop();
+                self.sync_modal_mode();
+                Task::none()
+            }
+            Mode::Palette => {
                 self.mode = Mode::Normal;
                 Task::none()
             }
@@ -361,6 +392,25 @@ impl State {
                     self.list_mut().set_filter(String::new());
                     self.scroll_list(true)
                 }
+            }
+        }
+    }
+
+    fn sync_modal_mode(&mut self) {
+        self.mode = if self.modals.is_empty() {
+            Mode::Normal
+        } else {
+            Mode::Modal
+        };
+        self.matcher.reset();
+    }
+
+    fn run_pending(&mut self, pending: Pending) -> Task<Message> {
+        match pending {
+            Pending::DeleteSelected => {
+                // Dummy data only; real deletion arrives with the host/key screens (Sprint 3).
+                self.list_mut().remove_selected();
+                self.scroll_list(false)
             }
         }
     }
@@ -567,7 +617,11 @@ impl State {
         .width(Fill)
         .style(container::bordered_box);
 
-        column![row![sidebar, main_area].height(Fill), status_bar].into()
+        let base = column![row![sidebar, main_area].height(Fill), status_bar];
+        match self.modals.top() {
+            Some(m) => iced::widget::stack![base, modal::view(m)].into(),
+            None => base.into(),
+        }
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
@@ -713,6 +767,38 @@ mod tests {
         let _ = s.update(Message::Dispatch(Action::MoveUp));
         let _ = s.update(Message::Dispatch(Action::MoveUp));
         assert_eq!(s.section, Section::Hosts);
+    }
+
+    #[test]
+    fn dd_opens_a_keyboard_operable_confirm_and_delete_removes_the_item() {
+        let mut s = main_state();
+        let _ = s.update(Message::Dispatch(Action::GoIdentities));
+        let before = s.list().len_visible();
+
+        // Delete -> Modal; Cancel keeps the item.
+        let _ = s.update(Message::Dispatch(Action::Delete));
+        assert_eq!(s.mode, Mode::Modal);
+        let _ = s.update(Message::Dispatch(Action::Cancel));
+        assert_eq!((s.mode, s.list().len_visible()), (Mode::Normal, before));
+
+        // Esc also cancels.
+        let _ = s.update(Message::Dispatch(Action::Delete));
+        let _ = s.update(Message::Dispatch(Action::Back));
+        assert_eq!((s.mode, s.list().len_visible()), (Mode::Normal, before));
+
+        // Confirm deletes.
+        let _ = s.update(Message::Dispatch(Action::Delete));
+        let _ = s.update(Message::Dispatch(Action::Confirm));
+        assert_eq!((s.mode, s.list().len_visible()), (Mode::Normal, before - 1));
+    }
+
+    #[test]
+    fn locking_closes_modals() {
+        let mut s = main_state();
+        let _ = s.update(Message::Dispatch(Action::Delete));
+        let _ = s.update(Message::Locked(Ok(())));
+        assert!(s.modals.is_empty());
+        assert_eq!(s.mode, Mode::Normal);
     }
 
     #[test]
