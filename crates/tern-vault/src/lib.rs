@@ -1,1 +1,10 @@
 //! tern-vault: stub (filled in by a later sprint).
+
+/// Errors produced by `tern-vault`. Variants are added as functionality lands.
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("{0}")]
+    Other(String),
+}
+
+pub type Result<T, E = Error> = std::result::Result<T, E>;
