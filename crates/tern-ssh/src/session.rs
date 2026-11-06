@@ -16,6 +16,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::Error;
 use crate::known_hosts::{HostKeyInfo, HostKeyVerdict, KnownHostsStore, verdict};
 use crate::pool::ConnectionPool;
+use crate::tunnel::RemoteForwards;
 
 /// A private key to authenticate with (OpenSSH PEM, possibly encrypted).
 #[derive(Clone)]
@@ -158,10 +159,35 @@ pub(crate) struct Handler {
     port: u16,
     known: Arc<dyn KnownHostsStore>,
     prompts: mpsc::UnboundedSender<HostKeyRequest>,
+    forwards: RemoteForwards,
 }
 
 impl client::Handler for Handler {
     type Error = HandlerError;
+
+    async fn server_channel_open_forwarded_tcpip(
+        &mut self,
+        channel: russh::Channel<client::Msg>,
+        _connected_address: &str,
+        connected_port: u32,
+        _originator_address: &str,
+        _originator_port: u32,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        match crate::tunnel::remote_target(&self.forwards, connected_port) {
+            Some(target) => {
+                reply.accept().await;
+                tokio::spawn(crate::tunnel::serve_remote(channel, target));
+            }
+            None => {
+                reply
+                    .reject(russh::ChannelOpenFailure::AdministrativelyProhibited)
+                    .await;
+            }
+        }
+        Ok(())
+    }
 
     async fn check_server_key(
         &mut self,
@@ -260,14 +286,16 @@ struct Actor {
 /// tunnels). The connection is closed when the last [`SharedConn`] is dropped.
 pub struct Conn {
     handle: Option<client::Handle<Handler>>,
+    pub(crate) forwards: RemoteForwards,
 }
 
 pub type SharedConn = Arc<Conn>;
 
 impl Conn {
-    fn new(handle: client::Handle<Handler>) -> SharedConn {
+    fn new(handle: client::Handle<Handler>, forwards: RemoteForwards) -> SharedConn {
         Arc::new(Self {
             handle: Some(handle),
+            forwards,
         })
     }
 
@@ -310,9 +338,10 @@ pub(crate) async fn connect_headless(
         commands: cmd_rx,
         headless: true,
     };
-    let mut handle = actor.connect(params, known).await?;
+    let forwards = RemoteForwards::default();
+    let mut handle = actor.connect(params, known, forwards.clone()).await?;
     actor.authenticate(&mut handle, params).await?;
-    Ok(Conn::new(handle))
+    Ok(Conn::new(handle, forwards))
 }
 
 /// Flush interval / size for coalescing remote output into few UI events.
@@ -336,9 +365,10 @@ impl Actor {
         let conn = match reused {
             Some(c) => c,
             None => {
-                let mut handle = self.connect(&params, known).await?;
+                let forwards = RemoteForwards::default();
+                let mut handle = self.connect(&params, known, forwards.clone()).await?;
                 self.authenticate(&mut handle, &params).await?;
-                let conn = Conn::new(handle);
+                let conn = Conn::new(handle, forwards);
                 if let Some((p, key)) = &pool {
                     p.insert(key, &conn);
                 }
@@ -365,6 +395,7 @@ impl Actor {
         &mut self,
         params: &ConnectParams,
         known: Arc<dyn KnownHostsStore>,
+        forwards: RemoteForwards,
     ) -> Result<client::Handle<Handler>, Error> {
         let config = Arc::new(client::Config {
             keepalive_interval: params.keepalive,
@@ -377,6 +408,7 @@ impl Actor {
             port: params.port,
             known,
             prompts: prompt_tx,
+            forwards,
         };
         let fut = client::connect(config, (params.host.as_str(), params.port), handler);
         tokio::pin!(fut);

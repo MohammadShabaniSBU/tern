@@ -4,6 +4,8 @@ pub mod keys;
 pub mod known_hosts;
 pub mod pool;
 pub mod session;
+pub mod socks5;
+pub mod tunnel;
 
 pub use known_hosts::{HostKeyInfo, HostKeyVerdict, KnownHostsStore};
 pub use pool::ConnectionPool;

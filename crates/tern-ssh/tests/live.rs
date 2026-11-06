@@ -10,11 +10,15 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use secrecy::SecretString;
+use tern_core::TunnelKind;
 use tern_ssh::known_hosts::BoxFuture;
+use tern_ssh::tunnel::{self, TunnelSpec};
 use tern_ssh::{
     ConnectParams, ConnectionPool, Error, HostKeyInfo, KnownHostsStore, SessionCommand,
     SessionEvent, spawn, spawn_pooled,
 };
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::Receiver;
 
 #[derive(Default)]
@@ -288,4 +292,155 @@ async fn terminal_and_headless_user_share_one_connection() {
     drop(shared);
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(pool.get("host-1").is_none(), "unused connection must close");
+}
+
+async fn shared(e: &Env) -> tern_ssh::SharedConn {
+    let known = Arc::new(MemKnown::default());
+    // Trust the host key the way a first terminal connect would.
+    let (h, mut rx) = spawn(params(e, &e.password), known.clone());
+    loop {
+        match next(&mut rx).await {
+            SessionEvent::HostKeyPrompt { .. } => {
+                h.send(SessionCommand::HostKeyDecision(true)).await;
+            }
+            SessionEvent::Connected => break,
+            SessionEvent::Error(err) => panic!("{err}"),
+            _ => {}
+        }
+    }
+    h.send(SessionCommand::Close).await;
+    ConnectionPool::new()
+        .get_or_connect("h", &params(e, &e.password), known)
+        .await
+        .expect("headless connect")
+}
+
+fn spec(kind: TunnelKind, bind_port: u16, target: Option<(&str, u16)>) -> TunnelSpec {
+    TunnelSpec {
+        kind,
+        bind_addr: "127.0.0.1".into(),
+        bind_port,
+        target_host: target.map(|t| t.0.into()),
+        target_port: target.map(|t| t.1),
+    }
+}
+
+async fn free_port() -> u16 {
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    l.local_addr().unwrap().port()
+}
+
+async fn read_banner(mut s: TcpStream) -> String {
+    let mut buf = [0u8; 8];
+    tokio::time::timeout(Duration::from_secs(10), s.read_exact(&mut buf))
+        .await
+        .expect("banner timeout")
+        .expect("banner read");
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
+#[tokio::test]
+async fn local_forward_reaches_a_target_through_the_server() {
+    let Some(e) = env() else { return };
+    let conn = shared(&e).await;
+    let port = free_port().await;
+    // The server's own sshd, as seen from the server.
+    let t = tunnel::start(
+        conn,
+        &spec(TunnelKind::Local, port, Some(("127.0.0.1", 2222))),
+    )
+    .await
+    .unwrap();
+    // Concurrent connections.
+    let (a, b) = tokio::join!(
+        async { read_banner(TcpStream::connect(("127.0.0.1", port)).await.unwrap()).await },
+        async { read_banner(TcpStream::connect(("127.0.0.1", port)).await.unwrap()).await },
+    );
+    assert_eq!((a.as_str(), b.as_str()), ("SSH-2.0-", "SSH-2.0-"));
+    assert!(t.stats.snapshot().1 >= 2);
+    t.stop().await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(TcpStream::connect(("127.0.0.1", port)).await.is_err());
+}
+
+#[tokio::test]
+async fn bind_conflict_is_reported_at_start() {
+    let Some(e) = env() else { return };
+    let conn = shared(&e).await;
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = l.local_addr().unwrap().port();
+    let err = tunnel::start(conn, &spec(TunnelKind::Dynamic, port, None))
+        .await
+        .err()
+        .expect("must fail");
+    assert!(err.to_string().contains("already in use"), "{err}");
+}
+
+#[tokio::test]
+async fn socks5_connect_with_remote_dns() {
+    let Some(e) = env() else { return };
+    let conn = shared(&e).await;
+    let port = free_port().await;
+    let t = tunnel::start(conn, &spec(TunnelKind::Dynamic, port, None))
+        .await
+        .unwrap();
+    let mut s = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    s.write_all(&[5, 1, 0]).await.unwrap();
+    let mut r = [0u8; 2];
+    s.read_exact(&mut r).await.unwrap();
+    assert_eq!(r, [5, 0]);
+    // "localhost" must be resolved by the server.
+    let mut req = vec![5, 1, 0, 3, 9];
+    req.extend_from_slice(b"localhost");
+    req.extend_from_slice(&2222u16.to_be_bytes());
+    s.write_all(&req).await.unwrap();
+    let mut rep = [0u8; 10];
+    s.read_exact(&mut rep).await.unwrap();
+    assert_eq!(rep[1], 0, "SOCKS reply code");
+    assert_eq!(read_banner(s).await, "SSH-2.0-");
+    t.stop().await;
+}
+
+#[tokio::test]
+async fn remote_forward_reaches_a_local_target() {
+    let Some(e) = env() else { return };
+    let conn = shared(&e).await;
+    // A local service that greets.
+    let svc = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let svc_port = svc.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        loop {
+            let (mut s, _) = svc.accept().await.unwrap();
+            let _ = s.write_all(b"hello-r!").await;
+        }
+    });
+    let remote_port = free_port().await;
+    let r = match tunnel::start(
+        conn.clone(),
+        &spec(
+            TunnelKind::Remote,
+            remote_port,
+            Some(("127.0.0.1", svc_port)),
+        ),
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(err) => {
+            eprintln!("server does not allow remote forwarding, skipping: {err}");
+            return;
+        }
+    };
+    // Reach the server-side listener through a local forward on the same connection.
+    let local = free_port().await;
+    let l = tunnel::start(
+        conn,
+        &spec(TunnelKind::Local, local, Some(("127.0.0.1", remote_port))),
+    )
+    .await
+    .unwrap();
+    let got = read_banner(TcpStream::connect(("127.0.0.1", local)).await.unwrap()).await;
+    assert_eq!(got, "hello-r!");
+    l.stop().await;
+    r.stop().await;
 }
