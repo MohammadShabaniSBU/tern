@@ -5,9 +5,6 @@
 //! every key press through [`Matcher::feed`]; the resulting [`Action`] goes to `State::dispatch`,
 //! the same entry point the command palette uses. Rules follow `docs/KEYBINDINGS.md`.
 
-// `bindings`/`keys_for` are consumed by the palette and cheat sheet (S2-T04, T09).
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -299,10 +296,6 @@ impl Keymap {
         &self.leader
     }
 
-    pub fn bindings(&self) -> &[Binding] {
-        &self.bindings
-    }
-
     /// Display strings of an action's bindings, e.g. for the palette's right-hand column.
     pub fn keys_for(&self, action: Action) -> Vec<&str> {
         self.bindings
@@ -314,10 +307,10 @@ impl Keymap {
 }
 
 fn default_leader() -> Chord {
-    Chord {
+    Chord::parse(DEFAULT_LEADER).unwrap_or(Chord {
         mods: Modifiers::CTRL,
         key: KeyId::Named(Named::Space),
-    }
+    })
 }
 
 /// What the matcher needs to know about the app right now.

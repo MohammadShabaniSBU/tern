@@ -1,6 +1,7 @@
 mod action;
 mod app;
 mod auth;
+mod cheatsheet;
 mod keymap;
 mod list;
 mod logging;

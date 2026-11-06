@@ -5,9 +5,6 @@
 //! (which iterate [`Action::ALL`]) pick it up automatically. Execution goes through
 //! `State::dispatch`, the single entry point shared by the keymap and the palette.
 
-// Fields and helpers here are consumed by the keymap, palette and cheat sheet (S2-T03, T04, T09).
-#![allow(dead_code)]
-
 use std::ops::BitOr;
 
 /// Which modes an action is available in.
@@ -135,7 +132,7 @@ const G: ModeMask = ModeMask::GLOBAL;
 actions! {
     // General
     OpenPalette  => "palette.open",   "Open command palette",  General, ["ctrl+k", "ctrl+shift+p"], ModeMask::GLOBAL.or(ModeMask::PALETTE);
-    CheatSheet   => "help.cheatsheet","Show keybinding cheat sheet", General, ["f1", "?"], G;
+    CheatSheet   => "help.cheatsheet","Show keybinding cheat sheet", General, ["f1", "?"], ModeMask::GLOBAL.or(ModeMask::MODAL);
     Settings     => "settings.open",  "Open settings",         General, ["ctrl+,"], G;
     ToggleTheme  => "theme.toggle",   "Toggle dark/light theme", General, [], G;
     Back         => "ui.back",        "Back / close",          General, ["esc"], ModeMask::ANY;

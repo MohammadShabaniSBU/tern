@@ -366,6 +366,18 @@ impl State {
                 }
                 Task::none()
             }
+            Action::CheatSheet => {
+                if matches!(self.modals.top(), Some(Modal::CheatSheet { .. })) {
+                    self.modals.pop();
+                } else {
+                    // Insert and Modal-from-cheatsheet cannot nest; remember where we came from.
+                    self.modals.push(Modal::CheatSheet {
+                        mode: self.mode.mask(),
+                    });
+                }
+                self.sync_modal_mode();
+                Task::none()
+            }
             Action::Confirm | Action::Cancel => {
                 let modal = self.modals.pop();
                 self.sync_modal_mode();
@@ -784,7 +796,7 @@ impl State {
 
         let base = column![row![sidebar, list_pane, detail].height(Fill), status_bar];
         match (self.modals.top(), self.mode) {
-            (Some(m), _) => iced::widget::stack![base, modal::view(m)].into(),
+            (Some(m), _) => iced::widget::stack![base, modal::view(m, &self.keymap)].into(),
             (None, Mode::Palette) => {
                 iced::widget::stack![base, palette::view(&self.palette)].into()
             }
@@ -1040,6 +1052,18 @@ mod tests {
         assert_eq!(s.theme(), Theme::Light);
         let _ = s.update(Message::Dispatch(Action::ToggleTheme));
         assert_eq!(s.theme(), Theme::Dark);
+    }
+
+    #[test]
+    fn f1_toggles_the_cheat_sheet() {
+        let mut s = main_state();
+        let _ = s.update(Message::Dispatch(Action::CheatSheet));
+        assert_eq!(s.mode, Mode::Modal);
+        let _ = s.update(Message::Dispatch(Action::CheatSheet));
+        assert_eq!(s.mode, Mode::Normal);
+        let _ = s.update(Message::Dispatch(Action::CheatSheet));
+        let _ = s.update(Message::Dispatch(Action::Back));
+        assert_eq!(s.mode, Mode::Normal);
     }
 
     #[test]

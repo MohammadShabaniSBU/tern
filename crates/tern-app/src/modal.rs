@@ -3,7 +3,10 @@
 use iced::widget::{column, container, row, space, text};
 use iced::{Center, Color, Element, Fill, Theme};
 
+use crate::action::ModeMask;
 use crate::app::Message;
+use crate::cheatsheet;
+use crate::keymap::Keymap;
 
 /// What happens when a confirm dialog is accepted.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,6 +21,8 @@ pub enum Modal {
         body: String,
         then: Pending,
     },
+    /// Keybinding cheat sheet, filtered to the mode it was opened from.
+    CheatSheet { mode: ModeMask },
 }
 
 /// Last-in-first-out stack; only the top modal receives keys.
@@ -47,12 +52,18 @@ impl ModalStack {
 }
 
 /// Dim backdrop with the dialog centred on it.
-pub fn view(modal: &Modal) -> Element<'_, Message> {
-    let Modal::Confirm { title, body, .. } = modal;
+pub fn view<'a>(modal: &'a Modal, keymap: &Keymap) -> Element<'a, Message> {
+    match modal {
+        Modal::Confirm { title, body, .. } => confirm_view(title, body),
+        Modal::CheatSheet { mode } => cheatsheet::view(keymap, *mode),
+    }
+}
+
+fn confirm_view<'a>(title: &'a str, body: &'a str) -> Element<'a, Message> {
     let dialog = container(
         column![
-            text(title.as_str()).size(18),
-            text(body.as_str()).size(14),
+            text(title).size(18),
+            text(body).size(14),
             space().height(8),
             row![
                 text("[y] / Enter  Yes").size(13),

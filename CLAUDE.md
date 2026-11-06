@@ -7,7 +7,9 @@ Full plan lives in `docs/` — read `docs/README.md`, `docs/ARCHITECTURE.md`, `d
 
 ## Current status
 
-Sprint 0 done (CI, S0-T03, skipped by the user). Sprint 1 done. Working through **Sprint 2 only** (`docs/sprints/sprint-02-keyboard-ui-shell.md`); done: S2-T01, S2-T02, S2-T03, S2-T05, S2-T06, S2-T07, S2-T04, S2-T08 (next: T09). Do not write code for later sprints.
+Sprint 0, 1 and 2 are done (S0-T03 CI was skipped by the user). Do not write code for later sprints until the user starts the next one (`docs/sprints/sprint-03-hosts-and-credentials.md`).
+
+Sprint 2 app modules (`crates/tern-app/src`): `action.rs` (one-table action registry; add an action there), `keymap.rs` (chords, sequences, mode-aware matcher, overrides from `settings`), `list.rs` (keyboard list model + view), `palette.rs`, `modal.rs` (stack; also hosts the cheat sheet), `cheatsheet.rs`, `toast.rs`. `State::dispatch` is the single entry for keymap and palette. List data is still dummy (`list::dummy_items`) until Sprint 3.
 - `tern-vault`: Argon2id KEK (128 MiB/8 passes, ~420 ms), XChaCha20-Poly1305 `seal/open`, `Vault` envelope (create/unlock/change_password/lock).
 - `tern-store`: migrations (`migrations/001_init.sql`), repos (secrets only via explicit `Vault` methods; AAD `"<table>:<column>:<row id>"`), `Store` = cloneable async handle over one worker thread that owns the Connection and the unlocked Vault.
 - `tern-app`: `app.rs` (Loading/Create/Unlock/Recovery/Main screens), `auth.rs` (forms, `Sensitive` password wrapper), `keymap.rs` (global key subscription; future keymap engine plugs in here), `logging.rs`, `paths.rs`.
