@@ -1824,10 +1824,17 @@ impl State {
                     );
                 }
             }
-            E::Exited(_) | E::Closed => {
-                s.note("[connection closed]");
+            E::Exited(_) | E::Closed if !matches!(s.phase, Phase::Connected) => {
+                // Already finished (Exited is followed by Closed): nothing more to show.
+            }
+            E::Exited(Some(code)) if code != 0 => {
+                s.note(&format!("[exited with status {code}]"));
                 s.finish(None);
                 self.end_session_ui(is_active);
+            }
+            E::Exited(_) | E::Closed => {
+                // Clean exit (`exit`, Ctrl+D): close the tab like a normal terminal.
+                self.remove_tab(idx);
             }
             E::Error(e) => {
                 let host = match &s.target {
