@@ -1,7 +1,10 @@
 //! tern-io: backup bundle, plaintext export, ssh_config import/export, key scanning.
 
 pub mod bundle;
+pub mod keyscan;
 pub mod merge;
+pub mod plain;
+pub mod ssh_config;
 
 pub use bundle::{Bundle, Payload, decrypt, encrypt};
 
