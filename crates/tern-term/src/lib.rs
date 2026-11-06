@@ -2,6 +2,8 @@
 
 pub mod emu;
 pub mod input;
+pub mod theme;
+pub mod widget;
 
 pub use emu::{
     Cell, CellFlags, Color, Cursor, CursorShape, Emulator, Modes, RowSpan, SelectKind, Snapshot,
