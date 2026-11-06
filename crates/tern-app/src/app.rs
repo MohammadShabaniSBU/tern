@@ -148,6 +148,8 @@ pub struct State {
     clip_token: u64,
     /// A copied password may still be on the clipboard (cleared on lock).
     secret_on_clipboard: bool,
+    /// Process start (approximately), for the startup-time log line.
+    started: Instant,
     autolock: AutoLock,
     gate: Gate,
     reauth: Option<ReauthPrompt>,
@@ -335,6 +337,7 @@ impl State {
             identity_form: None,
             clip_token: 0,
             secret_on_clipboard: false,
+            started: Instant::now(),
             autolock: AutoLock::new(std::time::SystemTime::now()),
             gate: Gate::default(),
             reauth: None,
@@ -366,6 +369,10 @@ impl State {
                 Task::none()
             }
             Message::VaultChecked(Ok(exists)) => {
+                tracing::info!(
+                    elapsed_ms = self.started.elapsed().as_millis() as u64,
+                    "first screen ready"
+                );
                 self.screen = if exists {
                     Screen::Unlock
                 } else {

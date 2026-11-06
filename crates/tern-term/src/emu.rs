@@ -812,6 +812,33 @@ fn convert_cell(c: &alacritty_terminal::term::cell::Cell) -> Cell {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    /// Throughput probe (S8-T06). Run:
+    /// `cargo test -p tern-term --release perf_ -- --ignored --nocapture`
+    #[test]
+    #[ignore = "timing probe; run manually in release mode"]
+    fn perf_feed_throughput() {
+        let line =
+            "\x1b[32mline\x1b[0m 0123456789 abcdefghijklmnopqrstuvwxyz the quick brown fox\r\n";
+        let chunk: Vec<u8> = line.repeat(1000).into_bytes(); // ~65 KB, like one coalesced event
+        let total = 50 * 1024 * 1024;
+        let mut term = Emulator::new(200, 50, 10_000);
+        let t = std::time::Instant::now();
+        let mut fed = 0;
+        while fed < total {
+            term.feed(&chunk);
+            fed += chunk.len();
+        }
+        let el = t.elapsed();
+        let snap = std::time::Instant::now();
+        let _ = term.snapshot();
+        println!(
+            "fed {} MiB in {el:?} ({:.0} MiB/s); one snapshot {:?}",
+            fed / (1024 * 1024),
+            fed as f64 / (1024.0 * 1024.0) / el.as_secs_f64(),
+            snap.elapsed()
+        );
+    }
+
     use super::*;
 
     #[test]

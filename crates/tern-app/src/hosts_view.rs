@@ -216,6 +216,36 @@ impl HostsData {
 
 #[cfg(test)]
 mod tests {
+    /// Timing probe for the 1,000-host target (S8-T06). Run:
+    /// `cargo test -p tern-app --release perf_ -- --ignored --nocapture`
+    #[test]
+    #[ignore = "timing probe; run manually in release mode"]
+    fn perf_thousand_hosts() {
+        use crate::list::ListState;
+        use std::time::Instant;
+        let mut data = HostsData::default();
+        for i in 0..1000 {
+            let mut h = Host::new(format!("host-{i:04}"), format!("h{i}.example.com"));
+            h.tags = vec![format!("t{}", i % 10)];
+            data.hosts.push(h);
+        }
+        let t = Instant::now();
+        let items = data.items(HostSort::default());
+        let build = t.elapsed();
+        let t = Instant::now();
+        let mut list = ListState::new(items);
+        let load = t.elapsed();
+        let t = Instant::now();
+        for q in ["h", "ho", "host-09", "t5", "zzz", ""] {
+            list.set_filter(q.to_owned());
+        }
+        let filter = t.elapsed() / 6;
+        println!(
+            "1000 hosts: build items {build:?}, load list {load:?}, filter (avg of 6) {filter:?}"
+        );
+        assert!(filter.as_millis() < 50, "filter too slow: {filter:?}");
+    }
+
     use super::*;
 
     fn data() -> HostsData {
