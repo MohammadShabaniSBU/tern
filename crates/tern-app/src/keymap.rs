@@ -10,13 +10,14 @@ use iced::keyboard::key::Named;
 use iced::keyboard::{self, Key, Modifiers};
 use iced::{Event, Subscription, event};
 
+use crate::action::Action;
 use crate::app::Message;
 
 /// Map a key press to an app message. Pure, so it can be unit-tested without a window.
 pub fn message_for_key(key: &Key, modifiers: Modifiers) -> Option<Message> {
     match key.as_ref() {
         Key::Character(c) if modifiers == Modifiers::CTRL && c.eq_ignore_ascii_case("k") => {
-            Some(Message::TogglePalette)
+            Some(Message::Dispatch(Action::OpenPalette))
         }
         Key::Named(Named::Enter) if modifiers.is_empty() => Some(Message::Acknowledge),
         // Tab / Shift+Tab move between form fields (docs/KEYBINDINGS.md, "Forms").
@@ -51,7 +52,7 @@ mod tests {
         for k in ["k", "K"] {
             assert!(matches!(
                 message_for_key(&ch(k), Modifiers::CTRL),
-                Some(Message::TogglePalette)
+                Some(Message::Dispatch(Action::OpenPalette))
             ));
         }
     }

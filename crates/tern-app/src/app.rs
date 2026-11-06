@@ -4,6 +4,7 @@ use iced::widget::{column, container, row, space, text};
 use iced::{Element, Fill, Subscription, Task, Theme};
 use tern_store::Store;
 
+use crate::action::{Action, Section};
 use crate::auth::{self, AuthFailure, AuthForm, CONFIRM_ID, PASSWORD_ID, Sensitive, retry_delay};
 use crate::keymap;
 
@@ -44,6 +45,7 @@ pub struct State {
     store: Store,
     pub screen: Screen,
     pub mode: Mode,
+    pub section: Section,
     form: AuthForm,
     host_count: Option<usize>,
 }
@@ -64,7 +66,9 @@ pub enum Message {
     Acknowledge,
     FocusNext,
     FocusPrevious,
-    TogglePalette,
+    /// Run an action; the single entry point shared by keymap and palette.
+    Dispatch(Action),
+    Locked(Result<(), String>),
 }
 
 impl State {
@@ -79,6 +83,7 @@ impl State {
             store,
             screen: Screen::Loading,
             mode: Mode::Normal,
+            section: Section::default(),
             form: AuthForm::default(),
             host_count: None,
         };
@@ -153,17 +158,47 @@ impl State {
             }
             Message::FocusNext => iced::widget::operation::focus_next(),
             Message::FocusPrevious => iced::widget::operation::focus_previous(),
-            Message::TogglePalette => {
-                // The palette only exists once unlocked.
-                if self.screen == Screen::Main {
-                    self.mode = match self.mode {
-                        Mode::Palette => Mode::Normal,
-                        _ => Mode::Palette,
-                    };
-                    tracing::debug!(mode = self.mode.label(), "palette toggled");
+            Message::Dispatch(action) => self.dispatch(action),
+            Message::Locked(result) => {
+                if let Err(e) = result {
+                    tracing::error!(error = %e, "lock failed");
                 }
+                // Even if the store reported an error, leave the main screen.
+                self.screen = Screen::Unlock;
+                self.mode = Mode::Normal;
+                self.host_count = None;
+                iced::widget::operation::focus(PASSWORD_ID)
+            }
+        }
+    }
+
+    /// Execute an action. Both the keymap and the command palette call this.
+    pub fn dispatch(&mut self, action: Action) -> Task<Message> {
+        // Everything except the auth screens' own handling needs the unlocked app.
+        if self.screen != Screen::Main {
+            return Task::none();
+        }
+        tracing::debug!(action = action.meta().id, "dispatch");
+        if let Some(section) = action.section() {
+            self.section = section;
+            return Task::none();
+        }
+        match action {
+            Action::OpenPalette => {
+                self.mode = match self.mode {
+                    Mode::Palette => Mode::Normal,
+                    _ => Mode::Palette,
+                };
                 Task::none()
             }
+            Action::LockVault => {
+                let store = self.store.clone();
+                Task::perform(async move { store.lock().await }, |r| {
+                    Message::Locked(r.map_err(|e| e.to_string()))
+                })
+            }
+            // Registered for the keymap/palette; implemented by later tasks and sprints.
+            _ => Task::none(),
         }
     }
 
@@ -344,14 +379,32 @@ mod tests {
     #[test]
     fn palette_toggle_only_when_unlocked() {
         let mut s = state();
-        let _ = s.update(Message::TogglePalette);
+        let _ = s.update(Message::Dispatch(Action::OpenPalette));
         assert_eq!(s.mode, Mode::Normal);
 
         let mut s = main_state();
-        let _ = s.update(Message::TogglePalette);
+        let _ = s.update(Message::Dispatch(Action::OpenPalette));
         assert_eq!(s.mode, Mode::Palette);
-        let _ = s.update(Message::TogglePalette);
+        let _ = s.update(Message::Dispatch(Action::OpenPalette));
         assert_eq!(s.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn dispatch_switches_sections_only_when_unlocked() {
+        let mut s = state();
+        let _ = s.update(Message::Dispatch(Action::GoKeys));
+        assert_eq!(s.section, Section::Hosts);
+
+        let mut s = main_state();
+        let _ = s.update(Message::Dispatch(Action::GoTunnels));
+        assert_eq!(s.section, Section::Tunnels);
+    }
+
+    #[test]
+    fn locked_returns_to_unlock_screen() {
+        let mut s = main_state();
+        let _ = s.update(Message::Locked(Ok(())));
+        assert_eq!(s.screen, Screen::Unlock);
     }
 
     #[test]
@@ -392,7 +445,7 @@ mod tests {
         assert_eq!(s.screen, Screen::Recovery);
 
         // Only Enter (Acknowledge) leaves it.
-        let _ = s.update(Message::TogglePalette);
+        let _ = s.update(Message::Dispatch(Action::OpenPalette));
         assert_eq!(s.screen, Screen::Recovery);
         let _ = s.update(Message::Acknowledge);
         assert_eq!(s.screen, Screen::Main);
