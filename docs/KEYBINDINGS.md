@@ -94,4 +94,6 @@ Copy mode: `h j k l`/arrows move, `w`/`b` word, `0`/`$` line ends, `g`/`G` top/b
 
 Palette-only actions: cycle color scheme (dark / light / solarized), cycle cursor style, toggle visual bell. Further preferences live in the `settings` table: `term.font_size`, `term.scrollback` (default 10000), `term.font` (system family), `term.scheme`, `term.cursor`.
 
-All bindings are overridable in settings (stored in the `settings` table as JSON).
+All bindings are overridable in **Settings → Keybindings** (stored in the `settings` table as JSON under `keymap`). Rebinding an action replaces all of its default keys with the one key pressed; multi-key sequences (`g g`) can still be written by hand in that JSON. Inside the settings screen: `Ctrl+Tab` / `Ctrl+Shift+Tab` switch section, `Ctrl+S` saves, `Esc` closes; in Keybindings `↑/↓` select, `Enter` rebind, `Del` unbind, `r` reset.
+
+Other settings keys: `lock.idle_minutes` (default 15, 0 = off), `lock.keep_sessions` (`true` keeps terminals and tunnels alive while locked).
