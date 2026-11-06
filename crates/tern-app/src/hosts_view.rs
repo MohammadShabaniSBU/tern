@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use tern_core::{Group, GroupId, Host, HostId, Identity, IdentityId};
 
 use crate::list::Item;
+use crate::palette::HostRef;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum HostSort {
@@ -114,9 +115,12 @@ impl HostsData {
         }
         meta.push_str("  ");
         meta.push_str(&self.last_seen(h.id));
+        let group = h.group_id.and_then(|g| self.group_name(g)).unwrap_or("");
+        let search = format!("{} {} {group}", h.hostname, h.tags.join(" "));
         Item::leaf(h.label.clone(), depth)
             .with_id(h.id.to_string())
             .with_meta(meta)
+            .with_search(search)
     }
 
     /// `user@hostname:port`; the user is the host override, else the identity's, else omitted.
@@ -132,6 +136,28 @@ impl HostsData {
             .map(|u| format!("{u}@"))
             .unwrap_or_default();
         format!("{user}{}:{}", h.hostname, h.port)
+    }
+
+    /// Entries for the palette's host picker.
+    pub fn host_refs(&self) -> Vec<HostRef> {
+        let mut hosts: Vec<&Host> = self.hosts.iter().collect();
+        hosts.sort_by_key(|h| h.label.to_lowercase());
+        hosts
+            .into_iter()
+            .map(|h| {
+                let mut detail = self.destination(h);
+                if !h.tags.is_empty() {
+                    detail.push_str(&format!("  #{}", h.tags.join(" #")));
+                }
+                if let Some(g) = h.group_id.and_then(|g| self.group_name(g)) {
+                    detail.push_str(&format!("  [{g}]"));
+                }
+                HostRef {
+                    label: h.label.clone(),
+                    detail,
+                }
+            })
+            .collect()
     }
 
     fn last_seen(&self, id: HostId) -> String {
@@ -241,6 +267,29 @@ mod tests {
             "root@b.example.com:22  #db #prod  2026-11-01"
         );
         assert_eq!(items[1].meta, "a.example.com:22  never");
+    }
+
+    #[test]
+    fn filter_matches_hostname_tags_and_group_name() {
+        let mut l = crate::list::ListState::new(data().items(HostSort::Label));
+        let shown = |l: &crate::list::ListState| -> Vec<String> {
+            l.visible_items(0..l.len_visible())
+                .map(|(_, i)| i.label.clone())
+                .collect()
+        };
+        l.set_filter("b.example".into());
+        assert_eq!(shown(&l), ["Work", "beta"]);
+        l.set_filter("PROD".into());
+        assert_eq!(shown(&l), ["Work", "beta"]);
+        l.set_filter("work".into());
+        assert_eq!(shown(&l), ["Work", "Alpha", "beta"]);
+    }
+
+    #[test]
+    fn picker_entries_carry_address_tags_and_group() {
+        let refs = data().host_refs();
+        assert_eq!(refs[0].label, "Alpha");
+        assert!(refs[1].detail.contains("#db #prod") && refs[1].detail.contains("[Work]"));
     }
 
     #[test]

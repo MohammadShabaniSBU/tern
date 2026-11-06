@@ -26,6 +26,8 @@ pub struct Item {
     pub id: Option<String>,
     /// Dimmed secondary text shown right-aligned in the row.
     pub meta: String,
+    /// Extra text the filter also matches (hostname, tags, group name…).
+    pub search: String,
 }
 
 impl Item {
@@ -36,6 +38,7 @@ impl Item {
             group: None,
             id: None,
             meta: String::new(),
+            search: String::new(),
         }
     }
 
@@ -49,6 +52,15 @@ impl Item {
     pub fn with_id(mut self, id: impl Into<String>) -> Self {
         self.id = Some(id.into());
         self
+    }
+
+    pub fn with_search(mut self, search: impl Into<String>) -> Self {
+        self.search = search.into();
+        self
+    }
+
+    fn matches(&self, needle: &str) -> bool {
+        self.label.to_lowercase().contains(needle) || self.search.to_lowercase().contains(needle)
     }
 
     pub fn with_meta(mut self, meta: impl Into<String>) -> Self {
@@ -247,7 +259,7 @@ impl ListState {
             let n = self.items.len();
             let mut keep = vec![false; n];
             for i in 0..n {
-                if self.items[i].label.to_lowercase().contains(&needle) {
+                if self.items[i].matches(&needle) {
                     keep[i] = true;
                     let mut p = self.parent_of(i);
                     while let Some(a) = p {

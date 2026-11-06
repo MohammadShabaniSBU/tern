@@ -17,7 +17,7 @@ use crate::keymap::{self, Chord, Context, Keymap, Matcher, Outcome};
 use crate::keys_view::KeysData;
 use crate::list::{self, ListState};
 use crate::modal::{self, Modal, ModalStack, Pending};
-use crate::palette::{self, Palette, Target};
+use crate::palette::{self, HostRef, Palette, Target};
 use crate::prompt::{self, Prompt, PromptKind, PromptOutcome};
 use crate::toast::{ToastKind, Toasts};
 
@@ -109,7 +109,7 @@ pub struct State {
     keymap: Keymap,
     matcher: Matcher,
     /// Host labels for the palette's "Connect: …" entries.
-    hosts: Vec<String>,
+    hosts: Vec<HostRef>,
     host_data: HostsData,
     host_sort: HostSort,
     host_form: Option<HostForm>,
@@ -292,12 +292,7 @@ impl State {
                     self.toast(ToastKind::Error, "Could not load hosts");
                 }
                 self.host_data = result.unwrap_or_default();
-                self.hosts = self
-                    .host_data
-                    .hosts
-                    .iter()
-                    .map(|h| h.label.clone())
-                    .collect();
+                self.hosts = self.host_data.host_refs();
                 self.rebuild_hosts_list();
                 Task::none()
             }
@@ -737,6 +732,12 @@ impl State {
                     _ => list.page(false),
                 }
                 self.scroll_list(false)
+            }
+            Action::QuickConnect => {
+                self.palette.open_hosts(&self.hosts);
+                self.mode = Mode::Palette;
+                self.matcher.reset();
+                iced::widget::operation::focus(palette::PALETTE_ID)
             }
             Action::OpenPalette => match self.mode {
                 Mode::Palette => {

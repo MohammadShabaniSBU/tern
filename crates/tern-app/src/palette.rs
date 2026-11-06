@@ -50,7 +50,23 @@ pub struct Palette {
     recent: Vec<String>,
 }
 
+/// A saved host as offered by the palette's connect entries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostRef {
+    pub label: String,
+    /// Extra searchable text (address, tags, group), shown dimmed after the label.
+    pub detail: String,
+}
+
 impl Palette {
+    /// Open as a host-only picker (`Ctrl+Shift+O`).
+    pub fn open_hosts(&mut self, hosts: &[HostRef]) {
+        self.open(&Keymap::defaults(), hosts);
+        self.entries
+            .retain(|e| matches!(e.target, Target::Connect(_)));
+        self.refresh();
+    }
+
     pub fn set_recent(&mut self, recent: Vec<String>) {
         self.recent = recent;
         self.recent.truncate(MAX_RECENT);
@@ -61,7 +77,7 @@ impl Palette {
     }
 
     /// Rebuild the entry list and reset the query. Called each time the palette opens.
-    pub fn open(&mut self, keymap: &Keymap, hosts: &[String]) {
+    pub fn open(&mut self, keymap: &Keymap, hosts: &[HostRef]) {
         self.query.clear();
         self.selected = 0;
         self.entries = Action::ALL
@@ -85,10 +101,14 @@ impl Palette {
                 }
             })
             .chain(hosts.iter().map(|h| Entry {
-                title: format!("Connect: {h}"),
-                target: Target::Connect(h.clone()),
+                title: if h.detail.is_empty() {
+                    format!("Connect: {}", h.label)
+                } else {
+                    format!("Connect: {}  {}", h.label, h.detail)
+                },
+                target: Target::Connect(h.label.clone()),
                 keys: String::new(),
-                recent_key: format!("host:{h}"),
+                recent_key: format!("host:{}", h.label),
             }))
             .collect();
         self.refresh();
@@ -237,7 +257,7 @@ mod tests {
 
     use super::*;
 
-    fn open(hosts: &[String]) -> Palette {
+    fn open(hosts: &[HostRef]) -> Palette {
         let mut p = Palette::default();
         p.open(&Keymap::defaults(), hosts);
         p
@@ -264,7 +284,11 @@ mod tests {
 
     #[test]
     fn fuzzy_matches_hosts() {
-        let hosts = vec!["prod-db".to_owned(), "staging-web".to_owned()];
+        let host = |l: &str| HostRef {
+            label: l.to_owned(),
+            detail: String::new(),
+        };
+        let hosts = vec![host("prod-db"), host("staging-web")];
         let mut p = open(&hosts);
         p.set_query("conn prod".into());
         assert_eq!(top(&p), Some("Connect: prod-db"));
@@ -331,8 +355,11 @@ mod tests {
 
     #[test]
     fn five_hundred_hosts_open_and_search_quickly() {
-        let hosts: Vec<String> = (0..500)
-            .map(|i| format!("server-{i:03}.example.com"))
+        let hosts: Vec<HostRef> = (0..500)
+            .map(|i| HostRef {
+                label: format!("server-{i:03}.example.com"),
+                detail: String::new(),
+            })
             .collect();
         let start = Instant::now();
         let mut p = open(&hosts);
