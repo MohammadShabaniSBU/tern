@@ -46,6 +46,10 @@ pub enum KeyError {
     WrongPassphrase,
     #[error("not a valid OpenSSH private key: {0}")]
     Invalid(String),
+    #[error("the public key is not valid: {0}")]
+    InvalidPublic(String),
+    #[error("the public key does not belong to this private key")]
+    PublicMismatch,
     #[error("key generation failed: {0}")]
     Generate(String),
 }
@@ -113,26 +117,48 @@ pub fn generate(
 
 /// Parse an OpenSSH private key (file contents or pasted text). Encrypted keys need their
 /// `passphrase`; the key is stored as given (still encrypted) together with it.
+///
+/// `public` is optional: when blank the public key is derived from the private one; when given
+/// it must belong to the private key and its comment is preserved.
 pub fn import(
     text: &str,
+    public: Option<&str>,
     comment: &str,
     passphrase: Option<&SecretString>,
 ) -> Result<KeyMaterial, KeyError> {
     let parsed =
         PrivateKey::from_openssh(text.trim()).map_err(|e| KeyError::Invalid(e.to_string()))?;
-    if !parsed.is_encrypted() {
-        return describe(&parsed, None, comment);
-    }
-    let Some(pass) = passphrase else {
-        return Err(KeyError::PassphraseRequired);
+    let given = match public.map(str::trim).filter(|p| !p.is_empty()) {
+        Some(p) => {
+            let key = russh::keys::PublicKey::from_openssh(p)
+                .map_err(|e| KeyError::InvalidPublic(e.to_string()))?;
+            if key.key_data() != parsed.public_key().key_data() {
+                return Err(KeyError::PublicMismatch);
+            }
+            Some(key)
+        }
+        None => None,
     };
-    let plain = parsed
-        .decrypt(pass.expose_secret())
-        .map_err(|_| KeyError::WrongPassphrase)?;
-    // Keep the original encrypted PEM; only the public metadata comes from the decrypted key.
-    let mut m = describe(&plain, None, comment)?;
-    m.private_pem = SecretString::from(text.trim().to_owned() + "\n");
-    m.passphrase = Some(pass.clone());
+    let mut m = if !parsed.is_encrypted() {
+        describe(&parsed, None, comment)?
+    } else {
+        let Some(pass) = passphrase else {
+            return Err(KeyError::PassphraseRequired);
+        };
+        let plain = parsed
+            .decrypt(pass.expose_secret())
+            .map_err(|_| KeyError::WrongPassphrase)?;
+        // Keep the original encrypted PEM; only the public metadata comes from the decrypted key.
+        let mut m = describe(&plain, None, comment)?;
+        m.private_pem = SecretString::from(text.trim().to_owned() + "\n");
+        m.passphrase = Some(pass.clone());
+        m
+    };
+    if let Some(key) = given {
+        m.public_key = key
+            .to_openssh()
+            .map_err(|e| KeyError::InvalidPublic(e.to_string()))?;
+    }
     Ok(m)
 }
 
@@ -151,7 +177,7 @@ mod tests {
         assert!(m.fingerprint.starts_with("SHA256:"));
         assert!(m.public_key.starts_with("ssh-ed25519 "));
         assert!(m.public_key.ends_with(" me@tern"));
-        let again = import(m.private_pem.expose_secret(), "", None).unwrap();
+        let again = import(m.private_pem.expose_secret(), None, "", None).unwrap();
         assert_eq!(again.fingerprint, m.fingerprint);
     }
 
@@ -166,22 +192,44 @@ mod tests {
         let m = generate(KeyKind::Ed25519, "", Some(&pass("hunter2"))).unwrap();
         let pem = m.private_pem.expose_secret().to_owned();
         assert!(matches!(
-            import(&pem, "", None),
+            import(&pem, None, "", None),
             Err(KeyError::PassphraseRequired)
         ));
         assert!(matches!(
-            import(&pem, "", Some(&pass("nope"))),
+            import(&pem, None, "", Some(&pass("nope"))),
             Err(KeyError::WrongPassphrase)
         ));
-        let ok = import(&pem, "", Some(&pass("hunter2"))).unwrap();
+        let ok = import(&pem, None, "", Some(&pass("hunter2"))).unwrap();
         assert_eq!(ok.fingerprint, m.fingerprint);
         assert!(ok.passphrase.is_some());
     }
 
     #[test]
+    fn public_key_is_optional_but_must_match_when_given() {
+        let m = generate(KeyKind::Ed25519, "mine", None).unwrap();
+        let other = generate(KeyKind::Ed25519, "other", None).unwrap();
+        let pem = m.private_pem.expose_secret();
+        // Blank / absent: derived.
+        let derived = import(pem, Some("  "), "", None).unwrap();
+        assert_eq!(derived.fingerprint, m.fingerprint);
+        // Matching: accepted, comment preserved.
+        let given = import(pem, Some(&m.public_key), "", None).unwrap();
+        assert!(given.public_key.ends_with(" mine"));
+        // Someone else's public key, or junk.
+        assert!(matches!(
+            import(pem, Some(&other.public_key), "", None),
+            Err(KeyError::PublicMismatch)
+        ));
+        assert!(matches!(
+            import(pem, Some("garbage"), "", None),
+            Err(KeyError::InvalidPublic(_))
+        ));
+    }
+
+    #[test]
     fn garbage_is_rejected() {
         assert!(matches!(
-            import("not a key", "", None),
+            import("not a key", None, "", None),
             Err(KeyError::Invalid(_))
         ));
     }

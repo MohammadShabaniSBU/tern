@@ -158,8 +158,9 @@ actions! {
     Delete       => "item.delete",    "Delete selected",       List, ["d d"], N;
     NewGroup     => "group.new",      "New group (nested under selected group)", List, ["shift+a"], N;
     MoveToGroup  => "host.move",      "Move host to group",    List, ["m"], N;
+    GenerateKey  => "key.generate",   "Generate a new SSH key", List, ["ctrl+n"], N;
     ImportKey    => "key.import",     "Import SSH key from file", List, ["i"], N;
-    PasteKey     => "key.paste",      "Import SSH key from clipboard", List, ["shift+p"], N;
+    PasteKey     => "key.paste",      "Add SSH key from clipboard", List, ["shift+p"], N;
     CopyPublicKey => "key.copy_public", "Copy public key",     List, ["shift+y"], N;
     ToggleMark   => "list.mark",      "Mark/unmark for bulk actions", List, ["space"], N;
     BulkTag      => "host.tag",       "Add tags to marked hosts", List, ["shift+t"], N;

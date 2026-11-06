@@ -181,6 +181,8 @@ pub enum Message {
     KeyLabelChanged(String),
     KeyPassphraseChanged(Sensitive),
     KeyKindPicked(tern_ssh::keys::KeyKind),
+    KeyPrivateEdit(iced::widget::text_editor::Action),
+    KeyPublicChanged(String),
     KeySubmit,
     KeySaved(Result<String, String>),
     ClipboardRead(Option<String>),
@@ -507,6 +509,8 @@ impl State {
             Message::KeyPathChanged(v) => self.edit_key_form(|f| f.path = v),
             Message::KeyLabelChanged(v) => self.edit_key_form(|f| f.label = v),
             Message::KeyPassphraseChanged(v) => self.edit_key_form(|f| f.passphrase = v),
+            Message::KeyPrivateEdit(a) => self.edit_key_form(|f| f.private.perform(a)),
+            Message::KeyPublicChanged(v) => self.edit_key_form(|f| f.public = v),
             Message::KeyKindPicked(k) => self.edit_key_form(|f| f.kind = k),
             Message::KeySubmit => self.submit_key_form(),
             Message::KeySaved(Ok(label)) => {
@@ -524,8 +528,8 @@ impl State {
             }
             Message::ClipboardRead(text) => match text.filter(|t| !t.trim().is_empty()) {
                 Some(t) => {
-                    let mut f = KeyForm::new(KeyMode::Paste);
-                    f.pasted = Sensitive::new(t);
+                    let mut f = KeyForm::new(KeyMode::Add);
+                    f.set_private(&t);
                     self.open_key_form(f)
                 }
                 None => {
@@ -752,8 +756,12 @@ impl State {
             Action::RevealStored | Action::ExportKey => Task::none(),
             Action::ToggleMark | Action::BulkTag | Action::Duplicate => Task::none(),
             Action::Add if self.section == Section::Keys => {
+                self.open_key_form(KeyForm::new(KeyMode::Add))
+            }
+            Action::GenerateKey if self.section == Section::Keys => {
                 self.open_key_form(KeyForm::new(KeyMode::Generate))
             }
+            Action::GenerateKey => Task::none(),
             Action::ImportKey if self.section == Section::Keys => {
                 self.open_key_form(KeyForm::new(KeyMode::ImportFile))
             }
@@ -1336,12 +1344,17 @@ impl State {
             form.error = Some("label must not be empty".into());
             return Task::none();
         }
+        if form.mode == KeyMode::Add && form.private.text().trim().is_empty() {
+            form.error = Some("paste the private key".into());
+            return Task::none();
+        }
         form.busy = true;
         form.error = None;
         let mode = form.mode;
         let kind = form.kind;
         let path = form.path.trim().to_owned();
-        let pasted = form.pasted.clone();
+        let pasted = form.private.text();
+        let public = form.public.clone();
         let passphrase =
             (!form.passphrase.is_empty()).then(|| form.passphrase.clone().take_secret());
         let store = self.store.clone();
@@ -1355,10 +1368,10 @@ impl State {
                             KeyMode::ImportFile => {
                                 let text = std::fs::read_to_string(expand_home(&path))
                                     .map_err(|e| format!("cannot read file: {e}"))?;
-                                keys::import(&text, "", passphrase.as_ref())
+                                keys::import(&text, None, "", passphrase.as_ref())
                             }
-                            KeyMode::Paste => {
-                                keys::import(pasted.as_str(), "", passphrase.as_ref())
+                            KeyMode::Add => {
+                                keys::import(&pasted, Some(&public), "", passphrase.as_ref())
                             }
                         }
                         .map_err(|e| e.to_string())

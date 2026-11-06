@@ -1,6 +1,6 @@
 //! Generate / import / paste SSH key form (S3-T04).
 
-use iced::widget::{column, container, pick_list, row, text, text_input};
+use iced::widget::{column, container, pick_list, row, text, text_editor, text_input};
 use iced::{Color, Element, Fill, Theme};
 use tern_ssh::keys::KeyKind;
 
@@ -11,21 +11,24 @@ use crate::auth::Sensitive;
 pub enum KeyMode {
     Generate,
     ImportFile,
-    /// Key text came from the clipboard.
-    Paste,
+    /// Paste a private key (and optionally its public key), like Termius.
+    Add,
 }
 
 pub const LABEL_ID: &str = "kf-label";
+pub const PUBLIC_ID: &str = "kf-public";
 pub const PATH_ID: &str = "kf-path";
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct KeyForm {
     pub mode: KeyMode,
     pub label: String,
     pub kind: KeyKind,
     pub path: String,
-    /// Clipboard text; private key material, so wrapped and never displayed.
-    pub pasted: Sensitive,
+    /// Pasted private key text (multi-line). Emptied once the form is submitted or closed.
+    pub private: text_editor::Content,
+    /// Optional; derived from the private key when blank.
+    pub public: String,
     pub passphrase: Sensitive,
     pub error: Option<String>,
     pub busy: bool,
@@ -38,11 +41,16 @@ impl KeyForm {
             label: String::new(),
             kind: KeyKind::Ed25519,
             path: String::new(),
-            pasted: Sensitive::default(),
+            private: text_editor::Content::new(),
+            public: String::new(),
             passphrase: Sensitive::default(),
             error: None,
             busy: false,
         }
+    }
+
+    pub fn set_private(&mut self, text: &str) {
+        self.private = text_editor::Content::with_text(text);
     }
 
     pub fn first_field(&self) -> &'static str {
@@ -56,7 +64,7 @@ impl KeyForm {
         match self.mode {
             KeyMode::Generate => "Generate SSH key",
             KeyMode::ImportFile => "Import SSH key from file",
-            KeyMode::Paste => "Import pasted SSH key",
+            KeyMode::Add => "Add SSH key",
         }
     }
 
@@ -72,18 +80,20 @@ impl KeyForm {
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default(),
-            KeyMode::Paste => "pasted key".into(),
+            KeyMode::Add => String::new(),
         }
     }
 }
 
+fn field<'a>(label: &'static str, input: Element<'a, Message>) -> Element<'a, Message> {
+    row![text(label).size(13).width(100), input]
+        .spacing(8)
+        .align_y(iced::Center)
+        .into()
+}
+
 pub fn view(form: &KeyForm) -> Element<'_, Message> {
     let mut body = column![text(form.title()).size(18)].spacing(8);
-    let field = |label: &'static str, input: Element<'static, Message>| {
-        row![text(label).size(13).width(100), input]
-            .spacing(8)
-            .align_y(iced::Center)
-    };
     if form.mode == KeyMode::ImportFile {
         body = body.push(field(
             "File",
@@ -111,6 +121,27 @@ pub fn view(form: &KeyForm) -> Element<'_, Message> {
         .padding(4)
         .into(),
     ));
+    if form.mode == KeyMode::Add {
+        body = body.push(field(
+            "Private key",
+            text_editor(&form.private)
+                .placeholder("-----BEGIN OPENSSH PRIVATE KEY-----")
+                .on_action(Message::KeyPrivateEdit)
+                .height(140)
+                .size(12)
+                .font(crate::app::MONO)
+                .into(),
+        ));
+        body = body.push(field(
+            "Public key",
+            text_input("(optional, derived from the private key)", &form.public)
+                .id(PUBLIC_ID)
+                .on_input(Message::KeyPublicChanged)
+                .on_submit(Message::KeySubmit)
+                .padding(4)
+                .into(),
+        ));
+    }
     if form.mode == KeyMode::Generate {
         body = body.push(field(
             "Type",
@@ -135,16 +166,13 @@ pub fn view(form: &KeyForm) -> Element<'_, Message> {
         .padding(4)
         .into(),
     ));
-    if form.mode == KeyMode::Paste {
-        body = body.push(text("Key text taken from the clipboard.").size(12));
-    }
     if form.busy {
         body = body.push(text("Working… (RSA 4096 can take a while)").size(13));
     }
     if let Some(e) = &form.error {
         body = body.push(text(e.as_str()).size(13).style(text::danger));
     }
-    body = body.push(text("Enter / Ctrl+S save   Tab next field   Esc cancel").size(12));
+    body = body.push(text("Ctrl+S save   Tab next field   Esc cancel").size(12));
     let dialog = container(body)
         .padding(20)
         .max_width(520)
@@ -173,7 +201,7 @@ mod tests {
         assert_eq!(f.effective_label(), "id_work");
         f.label = " mine ".into();
         assert_eq!(f.effective_label(), "mine");
-        assert_eq!(KeyForm::new(KeyMode::Paste).effective_label(), "pasted key");
+        assert_eq!(KeyForm::new(KeyMode::Add).effective_label(), "");
         assert_eq!(KeyForm::new(KeyMode::Generate).effective_label(), "");
     }
 }
