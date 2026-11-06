@@ -13,6 +13,10 @@ pub enum Error {
     /// specific: callers (and attackers) learn nothing beyond "it did not authenticate".
     #[error("decryption failed")]
     Decrypt,
+    #[error("wrong master password")]
+    WrongPassword,
+    #[error("master password must not be empty")]
+    EmptyPassword,
     #[error("ciphertext is too short")]
     Truncated,
     #[error("unsupported ciphertext version {0}")]

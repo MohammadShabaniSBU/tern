@@ -5,9 +5,11 @@
 
 mod crypto;
 mod error;
+mod vault;
 
 pub use crypto::{
     KEY_LEN, KdfParams, Key, SALT_LEN, VERSION, derive_kek, generate_salt, open, seal,
 };
 pub use error::{Error, Result};
 pub use secrecy::{ExposeSecret, SecretBox, SecretString};
+pub use vault::{Vault, VaultMeta};
