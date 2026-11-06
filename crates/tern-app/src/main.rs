@@ -6,6 +6,7 @@ mod list;
 mod logging;
 mod modal;
 mod paths;
+mod toast;
 
 use app::State;
 

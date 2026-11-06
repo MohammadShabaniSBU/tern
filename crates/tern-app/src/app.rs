@@ -12,6 +12,7 @@ use crate::auth::{self, AuthFailure, AuthForm, CONFIRM_ID, PASSWORD_ID, Sensitiv
 use crate::keymap::{self, Chord, Context, Keymap, Matcher, Outcome};
 use crate::list::{self, ListState};
 use crate::modal::{self, Modal, ModalStack, Pending};
+use crate::toast::{ToastKind, Toasts};
 
 /// Which part of the app owns the keyboard. See `docs/KEYBINDINGS.md`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -95,6 +96,7 @@ pub struct State {
     pub pane: Pane,
     lists: [ListState; 4],
     modals: ModalStack,
+    toasts: Toasts,
     form: AuthForm,
     keymap: Keymap,
     matcher: Matcher,
@@ -125,6 +127,7 @@ pub enum Message {
     /// `(leader, keymap overrides)` JSON from the settings table.
     KeymapLoaded(Result<(Option<String>, Option<String>), String>),
     Locked(Result<(), String>),
+    ToastTick(Instant),
     FilterChanged(String),
     /// `(offset_y, viewport_height)` reported by the list's scrollable.
     ListScrolled(f32, f32),
@@ -147,6 +150,7 @@ impl State {
             section: Section::default(),
             pane: Pane::default(),
             modals: ModalStack::default(),
+            toasts: Toasts::default(),
             lists: Section::ALL.map(|sec| ListState::new(list::dummy_items(sec))),
             form: AuthForm::default(),
             keymap: Keymap::defaults(),
@@ -215,6 +219,10 @@ impl State {
                 iced::widget::operation::focus(PASSWORD_ID)
             }
             Message::HostsLoaded(result) => {
+                if let Err(e) = &result {
+                    tracing::error!(error = %e, "could not load hosts");
+                    self.toast(ToastKind::Error, "Could not load hosts");
+                }
                 self.host_count = result.ok();
                 Task::none()
             }
@@ -243,9 +251,20 @@ impl State {
                     Ok((leader, overrides)) => {
                         self.keymap = Keymap::build(leader.as_deref(), overrides.as_deref());
                         self.matcher.reset();
+                        let problems = self.keymap.warnings.len() + self.keymap.conflicts.len();
+                        if problems > 0 {
+                            self.toast(
+                                ToastKind::Error,
+                                format!("Keymap has {problems} problem(s); see the log"),
+                            );
+                        }
                     }
                     Err(e) => tracing::error!(error = %e, "could not load keymap settings"),
                 }
+                Task::none()
+            }
+            Message::ToastTick(now) => {
+                self.toasts.expire(now);
                 Task::none()
             }
             Message::FilterChanged(text) => {
@@ -368,7 +387,13 @@ impl State {
                 })
             }
             // Registered for the keymap/palette; implemented by later tasks and sprints.
-            _ => Task::none(),
+            other => {
+                self.toast(
+                    ToastKind::Info,
+                    format!("Not available yet: {}", other.meta().title),
+                );
+                Task::none()
+            }
         }
     }
 
@@ -396,6 +421,10 @@ impl State {
         }
     }
 
+    fn toast(&mut self, kind: ToastKind, text: impl Into<String>) {
+        self.toasts.push(kind, text, Instant::now());
+    }
+
     fn sync_modal_mode(&mut self) {
         self.mode = if self.modals.is_empty() {
             Mode::Normal
@@ -409,7 +438,9 @@ impl State {
         match pending {
             Pending::DeleteSelected => {
                 // Dummy data only; real deletion arrives with the host/key screens (Sprint 3).
-                self.list_mut().remove_selected();
+                if let Some(label) = self.list_mut().remove_selected() {
+                    self.toast(ToastKind::Success, format!("Deleted '{label}'"));
+                }
                 self.scroll_list(false)
             }
         }
@@ -605,17 +636,27 @@ impl State {
             .width(Fill)
             .height(Fill);
 
-        let status_bar = container(
+        let mut status = row![
             text(format!(
                 "-- {} --   {}",
                 self.mode.label(),
                 self.pane.label()
             ))
             .size(14),
-        )
-        .padding([4, 12])
-        .width(Fill)
-        .style(container::bordered_box);
+            space().width(Fill),
+        ];
+        if let Some(toast) = self.toasts.current() {
+            let style: fn(&Theme) -> text::Style = match toast.kind {
+                ToastKind::Info => text::base,
+                ToastKind::Success => text::success,
+                ToastKind::Error => text::danger,
+            };
+            status = status.push(text(toast.text.as_str()).size(14).style(style));
+        }
+        let status_bar = container(status)
+            .padding([4, 12])
+            .width(Fill)
+            .style(container::bordered_box);
 
         let base = column![row![sidebar, main_area].height(Fill), status_bar];
         match self.modals.top() {
@@ -633,6 +674,11 @@ impl State {
             subs.push(
                 iced::time::every(std::time::Duration::from_millis(120))
                     .map(|_| Message::SpinnerTick),
+            );
+        }
+        if !self.toasts.is_empty() {
+            subs.push(
+                iced::time::every(std::time::Duration::from_millis(500)).map(Message::ToastTick),
             );
         }
         Subscription::batch(subs)
@@ -790,6 +836,11 @@ mod tests {
         let _ = s.update(Message::Dispatch(Action::Delete));
         let _ = s.update(Message::Dispatch(Action::Confirm));
         assert_eq!((s.mode, s.list().len_visible()), (Mode::Normal, before - 1));
+        assert!(
+            s.toasts
+                .current()
+                .is_some_and(|t| t.text.starts_with("Deleted"))
+        );
     }
 
     #[test]
