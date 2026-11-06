@@ -15,6 +15,7 @@ use crate::keymap::{self, Chord, Context, Keymap, Matcher, Outcome};
 use crate::list::{self, ListState};
 use crate::modal::{self, Modal, ModalStack, Pending};
 use crate::palette::{self, Palette, Target};
+use crate::prompt::{self, Prompt, PromptKind, PromptOutcome};
 use crate::toast::{ToastKind, Toasts};
 
 /// Which part of the app owns the keyboard. See `docs/KEYBINDINGS.md`.
@@ -109,6 +110,7 @@ pub struct State {
     host_data: HostsData,
     host_sort: HostSort,
     host_form: Option<HostForm>,
+    prompt: Option<Prompt>,
     palette: Palette,
 }
 
@@ -159,6 +161,10 @@ pub enum Message {
     /// Enter in a form field.
     FormSave,
     HostSaved(Result<String, String>),
+    PromptChanged(String),
+    PromptSubmit,
+    /// A group/move operation finished; the string is a toast message.
+    GroupsChanged(Result<String, String>),
 }
 
 impl State {
@@ -186,6 +192,7 @@ impl State {
             host_data: HostsData::default(),
             host_sort: HostSort::default(),
             host_form: None,
+            prompt: None,
             palette: Palette::default(),
         };
         (state, check)
@@ -345,6 +352,23 @@ impl State {
                 Task::none()
             }
             Message::FormSave => self.save_host_form(),
+            Message::PromptChanged(v) => {
+                if let Some(p) = &mut self.prompt {
+                    p.input = v;
+                    p.error = None;
+                }
+                Task::none()
+            }
+            Message::PromptSubmit => self.submit_prompt(),
+            Message::GroupsChanged(Ok(msg)) => {
+                self.toast(ToastKind::Success, msg);
+                self.reload_hosts()
+            }
+            Message::GroupsChanged(Err(e)) => {
+                tracing::error!(error = %e, "group operation failed");
+                self.toast(ToastKind::Error, "Operation failed");
+                Task::none()
+            }
             Message::HostSaved(Ok(label)) => {
                 self.host_form = None;
                 self.mode = Mode::Normal;
@@ -376,6 +400,7 @@ impl State {
                 self.hosts.clear();
                 self.host_data = HostsData::default();
                 self.host_form = None;
+                self.prompt = None;
                 self.modals.clear();
                 iced::widget::operation::focus(PASSWORD_ID)
             }
@@ -408,6 +433,40 @@ impl State {
                     |r| Message::SettingSaved(r.map_err(|e| e.to_string())),
                 )
             }
+            Action::Edit if self.selected_group().is_some() => {
+                let Some((id, name)) = self.selected_group() else {
+                    return Task::none();
+                };
+                self.open_prompt(Prompt::new(PromptKind::RenameGroup(id), name))
+            }
+            Action::NewGroup if self.section == Section::Hosts => {
+                let parent = self.selected_group().map(|(id, _)| id);
+                self.open_prompt(Prompt::new(PromptKind::NewGroup { parent }, ""))
+            }
+            Action::MoveToGroup if self.section == Section::Hosts => {
+                let host = self
+                    .list()
+                    .selected_item()
+                    .filter(|i| i.group.is_none())
+                    .and_then(|i| i.id.as_deref())
+                    .and_then(|id| self.host_data.host(id));
+                match host {
+                    Some(h) => {
+                        let current = h
+                            .group_id
+                            .and_then(|g| self.host_data.groups.iter().find(|x| x.id == g))
+                            .map(|g| g.name.clone())
+                            .unwrap_or_default();
+                        let id = h.id;
+                        self.open_prompt(Prompt::new(PromptKind::MoveHost(id), current))
+                    }
+                    None => {
+                        self.toast(ToastKind::Info, "Select a host to move");
+                        Task::none()
+                    }
+                }
+            }
+            Action::NewGroup | Action::MoveToGroup => Task::none(),
             Action::Add | Action::Edit => self.open_host_form(action == Action::Edit),
             Action::FormSave => self.save_host_form(),
             Action::FormNext if self.host_form.is_some() => iced::widget::operation::focus_next(),
@@ -429,7 +488,7 @@ impl State {
             Action::Delete => {
                 if let Some(item) = self.list().selected_item() {
                     let body = if item.group.is_some() {
-                        format!("Delete group '{}' and everything in it?", item.label)
+                        format!("Delete group '{}'? Its hosts become ungrouped.", item.label)
                     } else {
                         format!("Delete '{}'?", item.label)
                     };
@@ -548,6 +607,9 @@ impl State {
 
     /// `Esc`: move one step outwards. Modal -> palette -> insert -> clear the filter.
     fn back(&mut self) -> Task<Message> {
+        if self.prompt.take().is_some() {
+            return self.leave_insert();
+        }
         if let Some(form) = &mut self.host_form {
             if form.request_close() {
                 self.host_form = None;
@@ -654,6 +716,69 @@ impl State {
         Task::perform(async move { load_hosts(&store).await }, |r| {
             Message::HostsLoaded(r.map_err(|e| e.to_string()))
         })
+    }
+
+    /// `(id, name)` when the selected Hosts row is a group.
+    fn selected_group(&self) -> Option<(tern_core::GroupId, String)> {
+        if self.section != Section::Hosts {
+            return None;
+        }
+        let item = self.list().selected_item().filter(|i| i.group.is_some())?;
+        Some((item.id.as_deref()?.parse().ok()?, item.label.clone()))
+    }
+
+    fn open_prompt(&mut self, prompt: Prompt) -> Task<Message> {
+        self.prompt = Some(prompt);
+        self.mode = Mode::Insert;
+        self.matcher.reset();
+        iced::widget::operation::focus(prompt::PROMPT_ID)
+    }
+
+    fn submit_prompt(&mut self) -> Task<Message> {
+        let Some(p) = &mut self.prompt else {
+            return Task::none();
+        };
+        let outcome = match p.resolve(&self.host_data.groups) {
+            Ok(o) => o,
+            Err(e) => {
+                p.error = Some(e);
+                return Task::none();
+            }
+        };
+        self.prompt = None;
+        self.mode = Mode::Normal;
+        self.matcher.reset();
+        let store = self.store.clone();
+        Task::perform(
+            async move {
+                match outcome {
+                    PromptOutcome::CreateGroup(g) => {
+                        let name = g.name.clone();
+                        store
+                            .insert_group(g)
+                            .await
+                            .map(|()| format!("Created group '{name}'"))
+                    }
+                    PromptOutcome::RenameGroup(id, name) => {
+                        let groups = store.list_groups().await.map_err(|e| e.to_string())?;
+                        let Some(mut g) = groups.into_iter().find(|g| g.id == id) else {
+                            return Err("group no longer exists".to_owned());
+                        };
+                        g.name = name.clone();
+                        store
+                            .update_group(g)
+                            .await
+                            .map(|()| format!("Renamed to '{name}'"))
+                    }
+                    PromptOutcome::MoveHost(host, group) => store
+                        .set_host_group(host, group)
+                        .await
+                        .map(|()| "Moved host".to_owned()),
+                }
+                .map_err(|e| e.to_string())
+            },
+            Message::GroupsChanged,
+        )
     }
 
     fn open_host_form(&mut self, edit: bool) -> Task<Message> {
@@ -984,6 +1109,9 @@ impl State {
         let base = column![row![sidebar, list_pane, detail].height(Fill), status_bar];
         if let Some(form) = &self.host_form {
             return iced::widget::stack![base, host_form::view(form)].into();
+        }
+        if let Some(p) = &self.prompt {
+            return iced::widget::stack![base, prompt::view(p)].into();
         }
         match (self.modals.top(), self.mode) {
             (Some(m), _) => iced::widget::stack![base, modal::view(m, &self.keymap)].into(),

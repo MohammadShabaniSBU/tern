@@ -10,6 +10,7 @@ mod logging;
 mod modal;
 mod palette;
 mod paths;
+mod prompt;
 mod toast;
 
 use app::State;

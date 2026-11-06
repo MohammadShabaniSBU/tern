@@ -156,6 +156,8 @@ actions! {
     Add          => "item.add",       "Add new item",          List, ["a"], N;
     Edit         => "item.edit",      "Edit selected",         List, ["e"], N;
     Delete       => "item.delete",    "Delete selected",       List, ["d d"], N;
+    NewGroup     => "group.new",      "New group (nested under selected group)", List, ["shift+a"], N;
+    MoveToGroup  => "host.move",      "Move host to group",    List, ["m"], N;
     Duplicate    => "item.duplicate", "Duplicate selected",    List, ["y"], N;
     ToggleTunnels => "item.tunnels",  "Start/stop host tunnels", List, ["t"], N;
     // Forms
