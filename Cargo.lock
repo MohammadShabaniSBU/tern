@@ -4325,6 +4325,7 @@ dependencies = [
  "directories",
  "iced",
  "nucleo-matcher",
+ "rand",
  "secrecy",
  "serde_json",
  "tempfile",

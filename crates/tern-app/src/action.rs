@@ -167,6 +167,9 @@ actions! {
     FormSave     => "form.save",      "Form: save",            General, ["ctrl+s"], ModeMask::INSERT;
     FormNext     => "form.next",      "Form: next field",      General, ["tab"], ModeMask::INSERT;
     FormPrev     => "form.prev",      "Form: previous field",  General, ["shift+tab"], ModeMask::INSERT;
+    FormReveal   => "form.reveal",    "Form: reveal/hide password", General, ["ctrl+r"], ModeMask::INSERT;
+    FormGenerate => "form.generate",  "Form: generate password", General, ["ctrl+g"], ModeMask::INSERT;
+    FormCopy     => "form.copy",      "Form: copy password (clears in 30 s)", General, ["ctrl+shift+c"], ModeMask::INSERT;
     // Palette
     PaletteDown  => "palette.down",   "Palette: next result",  General, ["down", "ctrl+n"], ModeMask::PALETTE;
     PaletteUp    => "palette.up",     "Palette: previous result", General, ["up", "ctrl+p"], ModeMask::PALETTE;

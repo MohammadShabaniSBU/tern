@@ -11,6 +11,7 @@ use crate::action::{Action, Section};
 use crate::auth::{self, AuthFailure, AuthForm, CONFIRM_ID, PASSWORD_ID, Sensitive, retry_delay};
 use crate::host_form::{self, Choice, Field, HostForm, Picker};
 use crate::hosts_view::{HostSort, HostsData};
+use crate::identity_form::{self, IdField, IdentitiesData, IdentityForm};
 use crate::key_form::{self, KeyForm, KeyMode};
 use crate::keymap::{self, Chord, Context, Keymap, Matcher, Outcome};
 use crate::keys_view::KeysData;
@@ -114,6 +115,10 @@ pub struct State {
     host_form: Option<HostForm>,
     keys_data: KeysData,
     key_form: Option<KeyForm>,
+    ids_data: IdentitiesData,
+    identity_form: Option<IdentityForm>,
+    /// Incremented per password copy so only the latest copy's timer clears the clipboard.
+    clip_token: u64,
     prompt: Option<Prompt>,
     palette: Palette,
 }
@@ -173,6 +178,14 @@ pub enum Message {
     KeySubmit,
     KeySaved(Result<String, String>),
     ClipboardRead(Option<String>),
+    IdentitiesLoaded(Result<IdentitiesData, String>),
+    IdentityEdit(IdField, String),
+    IdentityPassword(Sensitive),
+    IdentityKey(Choice),
+    IdentityClearPassword(bool),
+    IdentitySave,
+    IdentitySaved(Result<String, String>),
+    ClipboardClear(u64),
     PromptChanged(String),
     PromptSubmit,
     /// A group/move operation finished; the string is a toast message.
@@ -206,6 +219,9 @@ impl State {
             host_form: None,
             keys_data: KeysData::default(),
             key_form: None,
+            ids_data: IdentitiesData::default(),
+            identity_form: None,
+            clip_token: 0,
             prompt: None,
             palette: Palette::default(),
         };
@@ -374,7 +390,48 @@ impl State {
                 self.keys_data = r.unwrap_or_default();
                 let items = self.keys_data.items();
                 self.lists[1].replace_items(items);
+                let ids = self.ids_data.items(&self.keys_data.keys);
+                self.lists[2].replace_items(ids);
                 Task::none()
+            }
+            Message::IdentitiesLoaded(r) => {
+                if let Err(e) = &r {
+                    tracing::error!(error = %e, "could not load identities");
+                    self.toast(ToastKind::Error, "Could not load identities");
+                }
+                self.ids_data = r.unwrap_or_default();
+                let items = self.ids_data.items(&self.keys_data.keys);
+                self.lists[2].replace_items(items);
+                Task::none()
+            }
+            Message::IdentityEdit(f, v) => self.edit_identity_form(|form| form.set_text(f, v)),
+            Message::IdentityPassword(v) => self.edit_identity_form(|form| {
+                form.password = v;
+                form.error = None;
+            }),
+            Message::IdentityKey(c) => self.edit_identity_form(|form| form.key = c),
+            Message::IdentityClearPassword(b) => {
+                self.edit_identity_form(|form| form.clear_password = b)
+            }
+            Message::IdentitySave => self.save_identity_form(),
+            Message::IdentitySaved(Ok(label)) => {
+                self.identity_form = None;
+                self.mode = Mode::Normal;
+                self.toast(ToastKind::Success, format!("Saved identity '{label}'"));
+                Task::batch([self.reload_identities(), self.reload_hosts()])
+            }
+            Message::IdentitySaved(Err(e)) => {
+                if let Some(f) = &mut self.identity_form {
+                    f.error = Some(format!("Could not save: {e}"));
+                }
+                Task::none()
+            }
+            Message::ClipboardClear(token) => {
+                if token == self.clip_token {
+                    iced::clipboard::write(String::new())
+                } else {
+                    Task::none()
+                }
             }
             Message::KeyPathChanged(v) => self.edit_key_form(|f| f.path = v),
             Message::KeyLabelChanged(v) => self.edit_key_form(|f| f.label = v),
@@ -436,7 +493,11 @@ impl State {
             }
             Message::ItemDeleted(Ok(label)) => {
                 self.toast(ToastKind::Success, format!("Deleted '{label}'"));
-                Task::batch([self.reload_hosts(), self.reload_keys()])
+                Task::batch([
+                    self.reload_hosts(),
+                    self.reload_keys(),
+                    self.reload_identities(),
+                ])
             }
             Message::ItemDeleted(Err(e)) => {
                 tracing::error!(error = %e, "delete failed");
@@ -455,6 +516,8 @@ impl State {
                 self.host_form = None;
                 self.prompt = None;
                 self.key_form = None;
+                self.identity_form = None;
+                self.ids_data = IdentitiesData::default();
                 self.keys_data = KeysData::default();
                 self.modals.clear();
                 iced::widget::operation::focus(PASSWORD_ID)
@@ -547,15 +610,40 @@ impl State {
                 }
             }
             Action::ImportKey | Action::PasteKey | Action::CopyPublicKey => Task::none(),
+            Action::Add | Action::Edit if self.section == Section::Identities => {
+                let existing = if action == Action::Edit {
+                    let found = self
+                        .list()
+                        .selected_item()
+                        .and_then(|i| i.id.as_deref())
+                        .and_then(|id| self.ids_data.identity(id));
+                    match found {
+                        Some(i) => Some((i.clone(), self.ids_data.with_password.contains(&i.id))),
+                        None => {
+                            self.toast(ToastKind::Info, "Select an identity to edit");
+                            return Task::none();
+                        }
+                    }
+                } else {
+                    None
+                };
+                self.identity_form = Some(IdentityForm::new(
+                    existing.as_ref().map(|(i, p)| (i, *p)),
+                    &self.keys_data.keys,
+                ));
+                self.mode = Mode::Insert;
+                self.matcher.reset();
+                iced::widget::operation::focus(identity_form::LABEL_ID)
+            }
+            Action::FormReveal | Action::FormGenerate | Action::FormCopy => {
+                self.identity_password_action(action)
+            }
             Action::Add | Action::Edit => self.open_host_form(action == Action::Edit),
             Action::FormSave if self.key_form.is_some() => self.submit_key_form(),
+            Action::FormSave if self.identity_form.is_some() => self.save_identity_form(),
             Action::FormSave => self.save_host_form(),
-            Action::FormNext if self.host_form.is_some() || self.key_form.is_some() => {
-                iced::widget::operation::focus_next()
-            }
-            Action::FormPrev if self.host_form.is_some() || self.key_form.is_some() => {
-                iced::widget::operation::focus_previous()
-            }
+            Action::FormNext if self.any_form_open() => iced::widget::operation::focus_next(),
+            Action::FormPrev if self.any_form_open() => iced::widget::operation::focus_previous(),
             Action::FormNext | Action::FormPrev => Task::none(),
             Action::SortToggle => {
                 if self.section == Section::Hosts {
@@ -690,6 +778,9 @@ impl State {
 
     /// `Esc`: move one step outwards. Modal -> palette -> insert -> clear the filter.
     fn back(&mut self) -> Task<Message> {
+        if self.identity_form.take().is_some() {
+            return self.leave_insert();
+        }
         if self.key_form.as_ref().is_some_and(|f| !f.busy) {
             self.key_form = None;
             return self.leave_insert();
@@ -773,13 +864,16 @@ impl State {
     fn run_pending(&mut self, pending: Pending) -> Task<Message> {
         match pending {
             Pending::DeleteSelected => {
-                let real = matches!(self.section, Section::Hosts | Section::Keys)
-                    .then(|| self.list().selected_item())
-                    .flatten()
-                    .and_then(|i| {
-                        i.id.clone()
-                            .map(|id| (id, i.group.is_some(), i.label.clone()))
-                    });
+                let real = matches!(
+                    self.section,
+                    Section::Hosts | Section::Keys | Section::Identities
+                )
+                .then(|| self.list().selected_item())
+                .flatten()
+                .and_then(|i| {
+                    i.id.clone()
+                        .map(|id| (id, i.group.is_some(), i.label.clone()))
+                });
                 if let Some((id, is_group, label)) = real {
                     return self.delete_host_or_group(&id, is_group, label);
                 }
@@ -865,6 +959,83 @@ impl State {
                 .map_err(|e| e.to_string())
             },
             Message::GroupsChanged,
+        )
+    }
+
+    fn any_form_open(&self) -> bool {
+        self.host_form.is_some() || self.key_form.is_some() || self.identity_form.is_some()
+    }
+
+    fn edit_identity_form(&mut self, f: impl FnOnce(&mut IdentityForm)) -> Task<Message> {
+        if let Some(form) = &mut self.identity_form {
+            f(form);
+        }
+        Task::none()
+    }
+
+    fn identity_password_action(&mut self, action: Action) -> Task<Message> {
+        let Some(form) = &mut self.identity_form else {
+            return Task::none();
+        };
+        match action {
+            Action::FormReveal => form.reveal = !form.reveal,
+            Action::FormGenerate => form.generate(),
+            _ => {
+                if form.password.is_empty() {
+                    self.toast(ToastKind::Info, "No password to copy");
+                    return Task::none();
+                }
+                let pw = form.password.as_str().to_owned();
+                self.clip_token += 1;
+                let token = self.clip_token;
+                self.toast(
+                    ToastKind::Success,
+                    "Copied password; clipboard clears in 30 s",
+                );
+                return Task::batch([
+                    iced::clipboard::write(pw),
+                    Task::perform(
+                        tokio::time::sleep(std::time::Duration::from_secs(30)),
+                        move |()| Message::ClipboardClear(token),
+                    ),
+                ]);
+            }
+        }
+        Task::none()
+    }
+
+    fn reload_identities(&self) -> Task<Message> {
+        let store = self.store.clone();
+        Task::perform(async move { load_identities(&store).await }, |r| {
+            Message::IdentitiesLoaded(r.map_err(|e| e.to_string()))
+        })
+    }
+
+    fn save_identity_form(&mut self) -> Task<Message> {
+        let Some(form) = &mut self.identity_form else {
+            return Task::none();
+        };
+        let draft = match form.build() {
+            Ok(d) => d,
+            Err(e) => {
+                form.error = Some(e);
+                return Task::none();
+            }
+        };
+        let store = self.store.clone();
+        Task::perform(
+            async move {
+                let label = draft.identity.label.clone();
+                let r = if draft.is_edit {
+                    store.update_identity(draft.identity, draft.password).await
+                } else {
+                    store
+                        .insert_identity(draft.identity, draft.password.flatten())
+                        .await
+                };
+                r.map(|()| label).map_err(|e| e.to_string())
+            },
+            Message::IdentitySaved,
         )
     }
 
@@ -1016,10 +1187,17 @@ impl State {
     fn delete_host_or_group(&mut self, id: &str, is_group: bool, label: String) -> Task<Message> {
         let store = self.store.clone();
         let is_key = self.section == Section::Keys;
+        let is_identity = self.section == Section::Identities;
         let id = id.to_owned();
         Task::perform(
             async move {
-                if is_key {
+                if is_identity {
+                    let iid = id.parse().map_err(|e| format!("{e}"))?;
+                    store
+                        .delete_identity(iid)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                } else if is_key {
                     let kid = id.parse().map_err(|e| format!("{e}"))?;
                     store.delete_key(kid).await.map_err(|e| e.to_string())?;
                 } else if is_group {
@@ -1175,7 +1353,7 @@ impl State {
                 |r| Message::SettingsLoaded(r.map_err(|e| e.to_string())),
             )
         };
-        Task::batch([hosts, keymap, self.reload_keys()])
+        Task::batch([hosts, keymap, self.reload_keys(), self.reload_identities()])
     }
 
     pub fn view(&self) -> Element<'_, Message> {
@@ -1248,6 +1426,11 @@ impl State {
                 .as_deref()
                 .and_then(|id| self.keys_data.detail(id))
                 .unwrap_or_else(|| item.label.clone()),
+            Some(item) if self.section == Section::Identities && item.id.is_some() => item
+                .id
+                .as_deref()
+                .and_then(|id| self.ids_data.detail(id, &self.keys_data.keys))
+                .unwrap_or_else(|| item.label.clone()),
             Some(item) => format!(
                 "{}\n\n(details arrive with the {} screen, Sprint 3)",
                 item.label,
@@ -1292,6 +1475,9 @@ impl State {
         }
         if let Some(f) = &self.key_form {
             return iced::widget::stack![base, key_form::view(f)].into();
+        }
+        if let Some(f) = &self.identity_form {
+            return iced::widget::stack![base, identity_form::view(f)].into();
         }
         match (self.modals.top(), self.mode) {
             (Some(m), _) => iced::widget::stack![base, modal::view(m, &self.keymap)].into(),
@@ -1368,6 +1554,20 @@ fn expand_home(path: &str) -> std::path::PathBuf {
         (Some(rest), Some(dirs)) => dirs.home_dir().join(rest),
         _ => std::path::PathBuf::from(path),
     }
+}
+
+async fn load_identities(store: &Store) -> tern_store::Result<IdentitiesData> {
+    let identities = store.list_identities().await?;
+    let mut with_password = std::collections::HashSet::new();
+    for i in &identities {
+        if store.identity_has_password(i.id).await? {
+            with_password.insert(i.id);
+        }
+    }
+    Ok(IdentitiesData {
+        identities,
+        with_password,
+    })
 }
 
 async fn load_keys(store: &Store) -> tern_store::Result<KeysData> {

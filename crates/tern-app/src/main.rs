@@ -4,6 +4,7 @@ mod auth;
 mod cheatsheet;
 mod host_form;
 mod hosts_view;
+mod identity_form;
 mod key_form;
 mod keymap;
 mod keys_view;
