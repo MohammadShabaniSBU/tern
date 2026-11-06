@@ -71,6 +71,8 @@ pub struct TerminalView<'a, Message> {
     pub focused: bool,
     /// Brief inverse flash (visual bell).
     pub flash: bool,
+    /// Overrides the cursor shape requested by the remote.
+    pub cursor_shape: Option<CursorShape>,
     pub on_event: Box<dyn Fn(TermEvent) -> Message + 'a>,
 }
 
@@ -95,7 +97,7 @@ impl<'a, Message: 'a> TerminalView<'a, Message> {
 
 #[derive(Default)]
 pub struct State {
-    last_size: Option<(usize, usize)>,
+    pending: Option<((usize, usize), (usize, usize))>,
     dragging: bool,
     last_click: Option<Click>,
     wheel_remainder: f32,
@@ -114,16 +116,20 @@ impl<Message> canvas::Program<Message> for TerminalView<'_, Message> {
         match event {
             Event::Window(window::Event::RedrawRequested(_)) => {
                 let dims = grid_for(bounds.size(), self.font_size);
-                if state.last_size != Some(dims) {
-                    state.last_size = Some(dims);
-                    if dims != (self.snapshot.cols, self.snapshot.rows) {
-                        return Some(Action::publish((self.on_event)(TermEvent::Resized {
-                            cols: dims.0,
-                            rows: dims.1,
-                        })));
-                    }
+                let current = (self.snapshot.cols, self.snapshot.rows);
+                if dims == current {
+                    state.pending = None;
+                    return None;
                 }
-                None
+                // Ask once per (target, current) pair so repeated redraws don't spam.
+                if state.pending == Some((dims, current)) {
+                    return None;
+                }
+                state.pending = Some((dims, current));
+                Some(Action::publish((self.on_event)(TermEvent::Resized {
+                    cols: dims.0,
+                    rows: dims.1,
+                })))
             }
             Event::Mouse(mouse::Event::ButtonPressed(Button::Left)) => {
                 let p = cursor.position_in(bounds)?;
@@ -419,10 +425,14 @@ impl<Message> TerminalView<'_, Message> {
             );
             return;
         }
-        if snap.cursor_blinking && !self.cursor_on {
+        if !snap.copy_mode && snap.cursor_blinking && !self.cursor_on {
             return;
         }
-        match cur.shape {
+        match self
+            .cursor_shape
+            .filter(|_| !snap.copy_mode)
+            .unwrap_or(cur.shape)
+        {
             CursorShape::Block => {
                 frame.fill_rectangle(Point::new(x, y), cell, color);
                 if let Some(c) = snap.cell(cur.row, cur.col)

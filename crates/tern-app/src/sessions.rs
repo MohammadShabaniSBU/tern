@@ -1,14 +1,15 @@
 //! SSH session state and view (S4-T05/T06): the bridge between the `tern-ssh` actor and iced.
 //!
-//! One session at a time until terminal tabs exist (Sprint 5). The output pane is a plain,
-//! sanitised text log and the input line is temporary.
+//! Each tab owns one session plus its terminal emulator (S5). The input line below the terminal is
+//! only used for authentication prompts.
 
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 
 use iced::futures::{Stream, stream};
-use iced::widget::{column, container, scrollable, text, text_input};
-use iced::{Element, Fill, Theme};
+use iced::widget::canvas::Cache;
+use iced::widget::{button, column, container, row, text, text_input};
+use iced::{Color, Element, Fill, Theme};
 use secrecy::SecretString;
 use tern_core::{HostId, Identity};
 use tern_ssh::known_hosts::BoxFuture;
@@ -17,15 +18,17 @@ use tern_ssh::{
     SessionHandle,
 };
 use tern_store::Store;
+use tern_term::widget::{TermEvent, TerminalView};
+use tern_term::{Emulator, Snapshot};
 use tokio::sync::mpsc::Receiver;
 
 use crate::app::Message;
 use crate::auth::Sensitive;
 use crate::palette::QuickTarget;
+use crate::term_settings::TermSettings;
 
 pub const SESSION_INPUT_ID: &str = "session-input";
-/// Output kept in memory (characters). Older text is dropped.
-const MAX_LOG: usize = 256 * 1024;
+pub const SEARCH_INPUT_ID: &str = "term-search";
 const SPINNER: [&str; 4] = ["|", "/", "-", "\\"];
 
 pub type SessionId = u64;
@@ -60,7 +63,20 @@ pub struct SessionView {
     pub target: ConnTarget,
     pub label: String,
     pub phase: Phase,
-    pub log: RawLog,
+    pub term: Emulator,
+    /// Last rendered state of `term`; refreshed by [`SessionView::refresh`].
+    pub snap: Snapshot,
+    pub cache: Cache,
+    /// User-chosen tab name (overrides `label`).
+    pub custom_name: Option<String>,
+    /// Latest search text while the search bar is open.
+    pub search: Option<String>,
+    /// Debounce token for the remote PTY resize.
+    pub resize_gen: u64,
+    /// Visual-bell flash is showing.
+    pub flash: bool,
+    /// The mouse moved since the selection started (a bare click selects nothing).
+    pub drag_moved: bool,
     /// The input line (command text, or an auth answer which may be a password).
     pub input: Sensitive,
     /// Answers collected so far for the current auth prompt.
@@ -70,13 +86,28 @@ pub struct SessionView {
 }
 
 impl SessionView {
-    pub fn new(id: SessionId, target: ConnTarget, label: String) -> Self {
+    pub fn new(
+        id: SessionId,
+        target: ConnTarget,
+        label: String,
+        size: (usize, usize),
+        scrollback: usize,
+    ) -> Self {
+        let term = Emulator::new(size.0, size.1, scrollback);
+        let snap = term.snapshot();
         Self {
+            term,
+            snap,
+            cache: Cache::new(),
+            custom_name: None,
+            search: None,
+            resize_gen: 0,
+            flash: false,
+            drag_moved: false,
             id,
             target,
             label,
             phase: Phase::Connecting,
-            log: RawLog::default(),
             input: Sensitive::default(),
             answers: Vec::new(),
             handle: None,
@@ -84,12 +115,26 @@ impl SessionView {
         }
     }
 
-    pub fn is_live(&self) -> bool {
-        !matches!(self.phase, Phase::Disconnected(_))
+    /// Tab title: user name, else the remote's OSC title for shells, else the host label.
+    pub fn display_name(&self) -> &str {
+        self.custom_name.as_deref().unwrap_or(&self.label)
     }
 
-    pub fn accepts_input(&self) -> bool {
-        matches!(self.phase, Phase::Connected | Phase::Auth { .. })
+    /// Re-snapshot the emulator and invalidate the drawn frame.
+    pub fn refresh(&mut self) {
+        self.snap = self.term.snapshot();
+        self.cache.clear();
+    }
+
+    /// Show a status line inside the terminal (e.g. "[connection closed]").
+    pub fn note(&mut self, msg: &str) {
+        self.term
+            .feed(format!("\r\n\x1b[2m{msg}\x1b[0m\r\n").as_bytes());
+        self.refresh();
+    }
+
+    pub fn is_live(&self) -> bool {
+        !matches!(self.phase, Phase::Disconnected(_))
     }
 
     /// The auth prompt currently being answered, if any.
@@ -317,151 +362,107 @@ pub fn friendly_error(e: &tern_ssh::Error, host: &str) -> String {
     }
 }
 
-/// Plain-text log of remote output: escape sequences and control characters are removed
-/// (a real terminal arrives in Sprint 5), partial UTF-8 and partial escapes carry over.
-#[derive(Debug, Default)]
-pub struct RawLog {
-    text: String,
-    carry: Vec<u8>,
-    esc: EscState,
+/// Presentation state shared by all tabs.
+pub struct ViewCtx<'a> {
+    pub settings: &'a TermSettings,
+    pub spinner_frame: usize,
+    pub cursor_on: bool,
+    /// The terminal has keyboard focus (Insert mode, no modal).
+    pub focused: bool,
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-enum EscState {
-    #[default]
-    Text,
-    Esc,
-    Csi,
-    Osc,
-    OscEsc,
-}
-
-impl RawLog {
-    pub fn as_str(&self) -> &str {
-        &self.text
-    }
-
-    pub fn push_bytes(&mut self, bytes: &[u8]) {
-        self.carry.extend_from_slice(bytes);
-        let carry = std::mem::take(&mut self.carry);
-        let mut rest: &[u8] = &carry;
-        loop {
-            match std::str::from_utf8(rest) {
-                Ok(s) => {
-                    self.push_str(s);
-                    break;
-                }
-                Err(e) => {
-                    let (good, bad) = rest.split_at(e.valid_up_to());
-                    // valid_up_to guarantees `good` is valid UTF-8.
-                    self.push_str(&String::from_utf8_lossy(good));
-                    match e.error_len() {
-                        Some(n) => {
-                            self.push_str("\u{fffd}");
-                            rest = &bad[n..];
-                        }
-                        None => {
-                            self.carry = bad.to_vec();
-                            break;
-                        }
-                    }
-                }
-            }
+fn phase_color(phase: &Phase) -> Color {
+    match phase {
+        Phase::Connected => Color::from_rgb8(0x3f, 0xb9, 0x50),
+        Phase::Connecting | Phase::HostKey | Phase::Auth { .. } => {
+            Color::from_rgb8(0xd2, 0x99, 0x22)
         }
-        self.trim();
-    }
-
-    fn push_str(&mut self, s: &str) {
-        for c in s.chars() {
-            match self.esc {
-                EscState::Text => match c {
-                    '\u{1b}' => self.esc = EscState::Esc,
-                    '\n' | '\t' => self.text.push(c),
-                    '\u{8}' => {
-                        // Backspace: erase the previous character on the current line.
-                        if self.text.chars().next_back().is_some_and(|p| p != '\n') {
-                            self.text.pop();
-                        }
-                    }
-                    c if c.is_control() => {}
-                    c => self.text.push(c),
-                },
-                EscState::Esc => {
-                    self.esc = match c {
-                        '[' => EscState::Csi,
-                        ']' => EscState::Osc,
-                        // Two-character escape (e.g. `ESC =`): done.
-                        _ => EscState::Text,
-                    };
-                }
-                EscState::Csi => {
-                    if ('\u{40}'..='\u{7e}').contains(&c) {
-                        self.esc = EscState::Text;
-                    }
-                }
-                EscState::Osc => match c {
-                    '\u{7}' => self.esc = EscState::Text,
-                    '\u{1b}' => self.esc = EscState::OscEsc,
-                    _ => {}
-                },
-                EscState::OscEsc => self.esc = EscState::Text,
-            }
-        }
-    }
-
-    fn trim(&mut self) {
-        if self.text.len() > MAX_LOG {
-            let mut cut = self.text.len() - MAX_LOG / 2;
-            while !self.text.is_char_boundary(cut) {
-                cut += 1;
-            }
-            self.text.drain(..cut);
-        }
-    }
-
-    /// Local status line (e.g. "Connected"), separated from remote output.
-    pub fn note(&mut self, line: &str) {
-        if !self.text.is_empty() && !self.text.ends_with('\n') {
-            self.text.push('\n');
-        }
-        self.text.push_str(line);
-        self.text.push('\n');
+        Phase::Disconnected(None) => Color::from_rgb8(0x88, 0x88, 0x88),
+        Phase::Disconnected(Some(_)) => Color::from_rgb8(0xf8, 0x51, 0x49),
     }
 }
 
-pub fn view<'a>(s: &'a SessionView, spinner_frame: usize) -> Element<'a, Message> {
+/// The tab strip: a "Hosts" home tab followed by one button per session.
+pub fn tab_bar<'a>(tabs: &'a [SessionView], active: Option<usize>) -> Element<'a, Message> {
+    let mut strip = row![].spacing(4).padding([4, 8]);
+    let home = button(text("Hosts").size(13))
+        .padding([3, 10])
+        .style(if active.is_none() {
+            button::primary
+        } else {
+            button::secondary
+        })
+        .on_press(Message::SelectHome);
+    strip = strip.push(home);
+    for (i, t) in tabs.iter().enumerate() {
+        let label = row![
+            text("●").size(11).color(phase_color(&t.phase)),
+            text(format!("{} {}", i + 1, t.display_name())).size(13),
+        ]
+        .spacing(6)
+        .align_y(iced::Center);
+        strip = strip.push(
+            button(label)
+                .padding([3, 10])
+                .style(if active == Some(i) {
+                    button::primary
+                } else {
+                    button::secondary
+                })
+                .on_press(Message::SelectTab(i)),
+        );
+    }
+    container(strip)
+        .width(Fill)
+        .style(container::bordered_box)
+        .into()
+}
+
+pub fn view<'a>(s: &'a SessionView, ctx: &ViewCtx<'a>) -> Element<'a, Message> {
+    let id = s.id;
+    let settings = ctx.settings;
     let status = match &s.phase {
-        Phase::Connecting | Phase::HostKey => format!(
+        Phase::Connecting | Phase::HostKey => Some(format!(
             "{} Connecting to {}…",
-            SPINNER[spinner_frame % SPINNER.len()],
+            SPINNER[ctx.spinner_frame % SPINNER.len()],
             s.label
-        ),
-        Phase::Auth { name, .. } => format!("{} — {name}", s.label),
-        Phase::Connected => format!("{} — connected", s.label),
-        Phase::Disconnected(None) => format!("{} — disconnected", s.label),
-        Phase::Disconnected(Some(why)) => format!("{} — {why}", s.label),
+        )),
+        Phase::Auth { name, .. } => Some(format!("{} — {name}", s.label)),
+        Phase::Connected => None,
+        Phase::Disconnected(None) => Some(format!("{} — disconnected", s.label)),
+        Phase::Disconnected(Some(why)) => Some(format!("{} — {why}", s.label)),
     };
     let hint = match &s.phase {
-        Phase::Disconnected(_) => "r reconnect   Esc / Ctrl+Shift+W close",
+        _ if s.snap.copy_mode => {
+            "COPY MODE  hjkl move  w/b word  0/$ line  g/G top/bottom  Ctrl+u/d page  v select  y copy  n/N search  Esc exit"
+        }
+        Phase::Disconnected(_) => {
+            "r reconnect   Ctrl+Shift+W close   Ctrl+Shift+Esc / Esc back to hosts"
+        }
         Phase::Connected => {
-            "Enter send   Esc normal mode (Esc again closes)   Ctrl+Shift+W disconnect"
+            "Ctrl+Shift+Esc leave terminal   Ctrl+Shift+F search   Ctrl+Shift+Space copy mode   F1 help"
         }
         _ => "Esc cancel",
     };
-    let mut body = column![
-        text(status).size(16),
-        container(
-            scrollable(text(s.log.as_str()).size(13).font(iced::Font::MONOSPACE))
-                .anchor_bottom()
-                .width(Fill)
-                .height(Fill)
-        )
-        .padding(8)
-        .width(Fill)
-        .height(Fill)
-        .style(container::bordered_box),
-    ]
-    .spacing(8);
+    let term = TerminalView {
+        snapshot: &s.snap,
+        cache: &s.cache,
+        scheme: settings.scheme.scheme(),
+        font: settings.font(),
+        font_size: settings.font_size,
+        cursor_on: ctx.cursor_on,
+        focused: ctx.focused,
+        flash: s.flash,
+        cursor_shape: settings.cursor.shape(),
+        on_event: Box::new(move |e: TermEvent| Message::Term(id, e)),
+    }
+    .into_element();
+
+    let mut body = column![].spacing(6);
+    if let Some(status) = status {
+        body = body.push(text(status).size(14));
+    }
+    body = body.push(container(term).width(Fill).height(Fill));
     if let Phase::Auth {
         instructions,
         prompts,
@@ -475,15 +476,10 @@ pub fn view<'a>(s: &'a SessionView, spinner_frame: usize) -> Element<'a, Message
             body = body.push(text(p.prompt.as_str()).size(14));
         }
     }
-    if s.accepts_input() {
+    if matches!(s.phase, Phase::Auth { .. }) {
         let secure = s.current_prompt().is_some_and(|p| !p.echo);
-        let placeholder = if matches!(s.phase, Phase::Connected) {
-            "type a command (temporary input line)"
-        } else {
-            ""
-        };
         body = body.push(
-            text_input(placeholder, s.input.as_str())
+            text_input("", s.input.as_str())
                 .id(SESSION_INPUT_ID)
                 .secure(secure)
                 .on_input(|v| Message::SessionInput(Sensitive::new(v)))
@@ -491,9 +487,29 @@ pub fn view<'a>(s: &'a SessionView, spinner_frame: usize) -> Element<'a, Message
                 .padding(6),
         );
     }
+    if let Some(q) = &s.search {
+        let count = match s.term.search_status() {
+            Some((cur, total)) => format!("{cur}/{total}"),
+            None => "0/0".to_owned(),
+        };
+        body = body.push(
+            row![
+                text("Search").size(13),
+                text_input("text in scrollback…", q)
+                    .id(SEARCH_INPUT_ID)
+                    .on_input(Message::SearchQuery)
+                    .on_submit(Message::SearchNext)
+                    .padding(4),
+                text(count).size(13),
+                text("Enter next  Ctrl+Shift+Alt+G prev  Esc close").size(12),
+            ]
+            .spacing(8)
+            .align_y(iced::Center),
+        );
+    }
     body = body.push(text(hint).size(12));
-    container(body.spacing(8))
-        .padding(12)
+    container(body)
+        .padding([4, 8])
         .width(Fill)
         .height(Fill)
         .style(|theme: &Theme| container::Style {
@@ -502,49 +518,13 @@ pub fn view<'a>(s: &'a SessionView, spinner_frame: usize) -> Element<'a, Message
         })
         .into()
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn strips_escape_sequences_and_controls() {
-        let mut l = RawLog::default();
-        l.push_bytes(b"\x1b[1;32muser@host\x1b[0m:~$ ls\r\n\x1b]0;title\x07done\n");
-        assert_eq!(l.as_str(), "user@host:~$ ls\ndone\n");
-    }
-
-    #[test]
-    fn partial_utf8_and_escape_carry_over_chunks() {
-        let mut l = RawLog::default();
-        let bytes = "héllo".as_bytes();
-        l.push_bytes(&bytes[..2]);
-        l.push_bytes(&bytes[2..]);
-        assert_eq!(l.as_str(), "héllo");
-        l.push_bytes(b"\x1b[3");
-        l.push_bytes(b"1mred");
-        assert_eq!(l.as_str(), "héllored");
-    }
-
-    #[test]
-    fn backspace_erases_within_the_line_only() {
-        let mut l = RawLog::default();
-        l.push_bytes(b"ab\x08c\n\x08x");
-        assert_eq!(l.as_str(), "ac\nx");
-    }
-
-    #[test]
-    fn log_is_capped() {
-        let mut l = RawLog::default();
-        for _ in 0..40 {
-            l.push_bytes(&vec![b'x'; 16 * 1024]);
-        }
-        assert!(l.as_str().len() <= MAX_LOG);
-    }
-
-    #[test]
     fn auth_answers_are_collected_per_prompt() {
-        let mut s = SessionView::new(1, ConnTarget::Saved("h".into()), "h".into());
+        let mut s = SessionView::new(1, ConnTarget::Saved("h".into()), "h".into(), (80, 24), 100);
         s.begin_auth(
             "kbd".into(),
             String::new(),

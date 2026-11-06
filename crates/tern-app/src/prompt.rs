@@ -21,6 +21,8 @@ pub enum PromptKind {
     BulkTag(Vec<HostId>),
     /// Destination file for an exported private key.
     ExportKey(KeyId),
+    /// New name for a terminal tab (empty restores the host label).
+    RenameTab(crate::sessions::SessionId),
 }
 
 #[derive(Debug, Clone)]
@@ -38,6 +40,7 @@ pub enum PromptOutcome {
     MoveHost(HostId, Option<GroupId>),
     AddTags(Vec<HostId>, Vec<String>),
     ExportKey(KeyId, String),
+    RenameTab(crate::sessions::SessionId, String),
 }
 
 impl Prompt {
@@ -56,6 +59,7 @@ impl Prompt {
             PromptKind::MoveHost(_) => "Move to group (empty = none)",
             PromptKind::BulkTag(_) => "Add tags (comma separated)",
             PromptKind::ExportKey(_) => "Export private key to file",
+            PromptKind::RenameTab(_) => "Rename tab (empty = host name)",
         }
     }
 
@@ -96,6 +100,7 @@ impl Prompt {
                 }
                 Ok(PromptOutcome::RenameGroup(*id, name.to_owned()))
             }
+            PromptKind::RenameTab(id) => Ok(PromptOutcome::RenameTab(*id, name.to_owned())),
             PromptKind::ExportKey(id) => {
                 if name.is_empty() {
                     return Err("enter a file path".into());

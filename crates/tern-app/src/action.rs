@@ -47,6 +47,7 @@ pub enum Category {
     Navigation,
     List,
     Tabs,
+    Terminal,
     Vault,
 }
 
@@ -57,6 +58,7 @@ impl Category {
             Category::Navigation => "Navigation",
             Category::List => "Lists",
             Category::Tabs => "Tabs",
+            Category::Terminal => "Terminal",
             Category::Vault => "Vault",
         }
     }
@@ -135,7 +137,7 @@ actions! {
     CheatSheet   => "help.cheatsheet","Show keybinding cheat sheet", General, ["f1", "?"], ModeMask::GLOBAL.or(ModeMask::MODAL);
     Settings     => "settings.open",  "Open settings",         General, ["ctrl+,"], G;
     ToggleTheme  => "theme.toggle",   "Toggle dark/light theme", General, [], G;
-    Back         => "ui.back",        "Back / close",          General, ["esc"], ModeMask::ANY;
+    Back         => "ui.back",        "Back / close",          General, ["esc", "ctrl+shift+esc"], ModeMask::ANY;
     // Navigation
     GoHosts      => "nav.hosts",      "Go to Hosts",           Navigation, ["1"], N;
     GoKeys       => "nav.keys",       "Go to Keys",            Navigation, ["2"], N;
@@ -174,7 +176,7 @@ actions! {
     FormPrev     => "form.prev",      "Form: previous field",  General, ["shift+tab"], ModeMask::INSERT;
     FormReveal   => "form.reveal",    "Form: reveal/hide password", General, ["ctrl+r"], ModeMask::INSERT;
     FormGenerate => "form.generate",  "Form: generate password", General, ["ctrl+g"], ModeMask::INSERT;
-    FormCopy     => "form.copy",      "Form: copy password (clears in 30 s)", General, ["ctrl+shift+c"], ModeMask::INSERT;
+    FormCopy     => "form.copy",      "Form: copy password (clears in 30 s); in a terminal: copy selection", General, ["ctrl+shift+c"], ModeMask::INSERT;
     // Palette
     PaletteDown  => "palette.down",   "Palette: next result",  General, ["down", "ctrl+n"], ModeMask::PALETTE;
     PaletteUp    => "palette.up",     "Palette: previous result", General, ["up", "ctrl+p"], ModeMask::PALETTE;
@@ -190,6 +192,33 @@ actions! {
     NextTab      => "tab.next",       "Next tab",              Tabs, ["ctrl+tab"], G;
     PrevTab      => "tab.prev",       "Previous tab",          Tabs, ["ctrl+shift+tab"], G;
     Reconnect    => "session.reconnect", "Reconnect disconnected session", Tabs, ["r"], N;
+    JumpTab1     => "tab.jump_1",     "Go to tab 1",           Tabs, ["ctrl+shift+1"], G;
+    JumpTab2     => "tab.jump_2",     "Go to tab 2",           Tabs, ["ctrl+shift+2"], G;
+    JumpTab3     => "tab.jump_3",     "Go to tab 3",           Tabs, ["ctrl+shift+3"], G;
+    JumpTab4     => "tab.jump_4",     "Go to tab 4",           Tabs, ["ctrl+shift+4"], G;
+    JumpTab5     => "tab.jump_5",     "Go to tab 5",           Tabs, ["ctrl+shift+5"], G;
+    JumpTab6     => "tab.jump_6",     "Go to tab 6",           Tabs, ["ctrl+shift+6"], G;
+    JumpTab7     => "tab.jump_7",     "Go to tab 7",           Tabs, ["ctrl+shift+7"], G;
+    JumpTab8     => "tab.jump_8",     "Go to tab 8",           Tabs, ["ctrl+shift+8"], G;
+    JumpTab9     => "tab.jump_9",     "Go to tab 9",           Tabs, ["ctrl+shift+9"], G;
+    RenameTab    => "tab.rename",     "Rename current tab",    Tabs, ["ctrl+shift+r"], G;
+    DuplicateTab => "tab.duplicate",  "Duplicate current tab (new session to the same host)", Tabs, ["ctrl+shift+d"], G;
+    // Terminal
+    TermCopy     => "term.copy",      "Copy terminal selection", Terminal, [], G;
+    TermPaste    => "term.paste",     "Paste into terminal",   Terminal, ["ctrl+shift+v"], G;
+    TermSearch   => "term.search",    "Search terminal scrollback", Terminal, ["ctrl+shift+f"], G;
+    SearchNext   => "term.search_next", "Next search match",   Terminal, ["ctrl+shift+g"], G;
+    SearchPrev   => "term.search_prev", "Previous search match", Terminal, ["ctrl+alt+shift+g"], G;
+    CopyMode     => "term.copy_mode", "Keyboard copy mode (hjkl, v select, y copy)", Terminal, ["ctrl+shift+space"], G;
+    ScrollPageUp => "term.scroll_up", "Scroll terminal page up", Terminal, ["shift+pageup"], G;
+    ScrollPageDown => "term.scroll_down", "Scroll terminal page down", Terminal, ["shift+pagedown"], G;
+    FontBigger   => "term.font_bigger", "Terminal font bigger", Terminal, ["ctrl+="], G;
+    FontSmaller  => "term.font_smaller", "Terminal font smaller", Terminal, ["ctrl+-"], G;
+    FontReset    => "term.font_reset", "Terminal font size reset", Terminal, ["ctrl+0"], G;
+    CycleScheme  => "term.scheme",    "Cycle terminal color scheme", Terminal, [], G;
+    CycleCursor  => "term.cursor",    "Cycle terminal cursor style", Terminal, [], G;
+    ToggleBell   => "term.bell",      "Toggle visual bell",    Terminal, [], G;
+    TogglePasteWarn => "term.paste_warn", "Toggle multi-line paste warning", Terminal, [], G;
     // Vault
     LockVault    => "vault.lock",     "Lock vault",            Vault, ["ctrl+shift+l"], G;
 }
@@ -204,6 +233,22 @@ impl Action {
             Action::GoTunnels => Some(Section::Tunnels),
             _ => None,
         }
+    }
+
+    /// 0-based tab index for the `JumpTabN` actions.
+    pub fn jump_index(self) -> Option<usize> {
+        Some(match self {
+            Action::JumpTab1 => 0,
+            Action::JumpTab2 => 1,
+            Action::JumpTab3 => 2,
+            Action::JumpTab4 => 3,
+            Action::JumpTab5 => 4,
+            Action::JumpTab6 => 5,
+            Action::JumpTab7 => 6,
+            Action::JumpTab8 => 7,
+            Action::JumpTab9 => 8,
+            _ => return None,
+        })
     }
 
     pub fn from_id(id: &str) -> Option<Action> {

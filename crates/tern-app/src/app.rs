@@ -21,7 +21,10 @@ use crate::palette::{self, HostRef, Palette, Target};
 use crate::prompt::{self, Prompt, PromptKind, PromptOutcome};
 use crate::reauth::{self, Gate, ReauthPrompt, SensitiveOp};
 use crate::sessions::{self, AppKnownHosts, ConnTarget, Phase, SessionId, SessionView, Spawned};
+use crate::term_settings::{self, TermSettings};
 use crate::toast::{ToastKind, Toasts};
+use tern_term::widget::TermEvent;
+use tern_term::{Motion, SelectKind};
 
 /// Which part of the app owns the keyboard. See `docs/KEYBINDINGS.md`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -127,9 +130,15 @@ pub struct State {
     revealed: Option<(String, Sensitive)>,
     prompt: Option<Prompt>,
     palette: Palette,
-    /// The one open SSH session (tabs arrive in Sprint 5).
-    session: Option<SessionView>,
+    /// Open terminal tabs; `active` is the focused one (`None` = the host list).
+    tabs: Vec<SessionView>,
+    active: Option<usize>,
     next_session: SessionId,
+    term_settings: TermSettings,
+    /// Grid size of the last terminal widget, used for new sessions' PTY.
+    term_size: (usize, usize),
+    /// Cursor blink phase.
+    cursor_on: bool,
 }
 
 /// Settings read from the `settings` table after unlocking.
@@ -140,6 +149,7 @@ pub struct LoadedSettings {
     recent: Option<String>,
     theme: Option<String>,
     reauth: Option<String>,
+    term: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone)]
@@ -161,7 +171,7 @@ pub enum Message {
     /// Run an action; the single entry point shared by keymap and palette.
     Dispatch(Action),
     /// A key press on the main screen, routed through the keymap engine.
-    Key(Chord),
+    Key(Chord, keymap::RawKey),
     /// `(leader, keymap overrides)` JSON from the settings table.
     SettingsLoaded(Result<LoadedSettings, String>),
     PaletteQueryChanged(String),
@@ -214,6 +224,20 @@ pub enum Message {
     /// Enter in the session input line.
     SessionSubmit,
     SessionTouched(Result<(), String>),
+    /// Select a tab (`SelectHome` = the host list).
+    SelectTab(usize),
+    SelectHome,
+    /// Event from a tab's terminal widget.
+    Term(SessionId, TermEvent),
+    /// Debounced PTY resize is due.
+    ResizeFlush(SessionId, u64),
+    /// Visual bell finished.
+    FlashEnd(SessionId),
+    BlinkTick,
+    /// Clipboard contents for a terminal paste.
+    Pasted(Option<String>),
+    SearchQuery(String),
+    SearchNext,
 }
 
 impl State {
@@ -251,8 +275,12 @@ impl State {
             revealed: None,
             prompt: None,
             palette: Palette::default(),
-            session: None,
+            tabs: Vec::new(),
+            active: None,
             next_session: 0,
+            term_settings: TermSettings::default(),
+            term_size: (80, 24),
+            cursor_on: true,
         };
         (state, check)
     }
@@ -332,17 +360,30 @@ impl State {
             Message::FocusNext => iced::widget::operation::focus_next(),
             Message::FocusPrevious => iced::widget::operation::focus_previous(),
             Message::Dispatch(action) => self.dispatch(action),
-            Message::Key(chord) => {
+            Message::Key(chord, raw) => {
                 if self.screen != Screen::Main {
                     return Task::none();
                 }
+                let terminal = self.terminal_focused();
+                if terminal
+                    && self.tab().is_some_and(|t| t.term.in_copy_mode())
+                    && !is_app_chord(&chord)
+                {
+                    return self.copy_mode_key(&chord);
+                }
                 let ctx = Context {
                     mode: self.mode.mask(),
-                    terminal: false,
+                    terminal,
                 };
                 match self.matcher.feed(&self.keymap, ctx, chord, Instant::now()) {
                     Outcome::Action(action) => self.dispatch(action),
-                    Outcome::Pending | Outcome::Unhandled => Task::none(),
+                    Outcome::Pending => Task::none(),
+                    Outcome::Unhandled => {
+                        if terminal {
+                            self.send_raw_key(&raw);
+                        }
+                        Task::none()
+                    }
                 }
             }
             Message::SettingSaved(result) => {
@@ -368,6 +409,13 @@ impl State {
                         self.keymap =
                             Keymap::build(loaded.leader.as_deref(), loaded.keymap.as_deref());
                         self.gate.set_minutes_from_setting(loaded.reauth.as_deref());
+                        for (k, v) in &loaded.term {
+                            self.term_settings.apply(k, v);
+                        }
+                        for t in &mut self.tabs {
+                            t.term.set_scrollback(self.term_settings.scrollback);
+                            t.refresh();
+                        }
                         self.matcher.reset();
                         let problems = self.keymap.warnings.len() + self.keymap.conflicts.len();
                         if problems > 0 {
@@ -614,17 +662,58 @@ impl State {
                 self.ids_data = IdentitiesData::default();
                 self.keys_data = KeysData::default();
                 self.modals.clear();
-                self.close_session();
+                self.close_all_tabs();
                 iced::widget::operation::focus(PASSWORD_ID)
             }
             Message::SessionSpawned(id, result) => self.on_session_spawned(id, result),
             Message::Session(id, event) => self.on_session_event(id, event),
             Message::SessionInput(v) => {
-                if let Some(s) = &mut self.session {
+                if let Some(s) = self.tab_mut() {
                     s.input = v;
                 }
                 Task::none()
             }
+            Message::SelectTab(i) => self.activate(i),
+            Message::SelectHome => self.go_home(),
+            Message::Term(id, ev) => self.on_term_event(id, ev),
+            Message::ResizeFlush(id, gen_) => {
+                if let Some(s) = self
+                    .tabs
+                    .iter()
+                    .find(|t| t.id == id && t.resize_gen == gen_)
+                    && let Some(h) = &s.handle
+                {
+                    h.try_send(tern_ssh::SessionCommand::Resize {
+                        cols: s.term.cols() as u32,
+                        rows: s.term.rows() as u32,
+                    });
+                }
+                Task::none()
+            }
+            Message::FlashEnd(id) => {
+                if let Some(s) = self.tabs.iter_mut().find(|t| t.id == id) {
+                    s.flash = false;
+                    s.cache.clear();
+                }
+                Task::none()
+            }
+            Message::BlinkTick => {
+                self.cursor_on = !self.cursor_on;
+                Task::none()
+            }
+            Message::Pasted(text) => match text {
+                Some(t) => self.paste_text(t),
+                None => Task::none(),
+            },
+            Message::SearchQuery(q) => {
+                if let Some(s) = self.tab_mut() {
+                    s.term.search(&q);
+                    s.search = Some(q);
+                    s.refresh();
+                }
+                Task::none()
+            }
+            Message::SearchNext => self.search_step(true),
             Message::SessionSubmit => self.submit_session_input(),
             Message::SessionTouched(result) => {
                 if let Err(e) = result {
@@ -642,20 +731,7 @@ impl State {
             return Task::none();
         }
         tracing::debug!(action = action.meta().id, "dispatch");
-        if self.session.is_some()
-            && !matches!(
-                action,
-                Action::Back
-                    | Action::Open
-                    | Action::CloseTab
-                    | Action::Reconnect
-                    | Action::Confirm
-                    | Action::Cancel
-                    | Action::ReplaceHostKey
-                    | Action::CheatSheet
-                    | Action::LockVault
-            )
-        {
+        if self.active.is_some() && !tab_action_allowed(action) {
             return Task::none();
         }
         // A revealed password must not follow the selection around.
@@ -857,6 +933,8 @@ impl State {
                 self.matcher.reset();
                 iced::widget::operation::focus(identity_form::LABEL_ID)
             }
+            Action::TermCopy | Action::FormCopy if self.terminal_tab() => self.term_copy(),
+            Action::TermCopy => Task::none(),
             Action::FormReveal | Action::FormGenerate | Action::FormCopy => {
                 self.identity_password_action(action)
             }
@@ -918,16 +996,23 @@ impl State {
                     _ => Task::none(),
                 }
             }
-            Action::Open if self.session.is_some() => {
-                let Some(s) = &self.session else {
+            Action::Open if self.active.is_some() => {
+                let Some(s) = self.tab() else {
                     return Task::none();
                 };
-                if s.accepts_input() {
-                    self.mode = Mode::Insert;
-                    self.matcher.reset();
-                    return iced::widget::operation::focus(sessions::SESSION_INPUT_ID);
+                match s.phase {
+                    Phase::Connected => {
+                        self.mode = Mode::Insert;
+                        self.matcher.reset();
+                        Task::none()
+                    }
+                    Phase::Auth { .. } => {
+                        self.mode = Mode::Insert;
+                        self.matcher.reset();
+                        iced::widget::operation::focus(sessions::SESSION_INPUT_ID)
+                    }
+                    _ => Task::none(),
                 }
-                Task::none()
             }
             Action::Open if self.section == Section::Hosts => {
                 let Some(item) = self.list().selected_item() else {
@@ -946,18 +1031,13 @@ impl State {
                     (None, None) => Task::none(),
                 }
             }
-            Action::CloseTab => {
-                if self.session.is_some() {
-                    self.close_session();
-                    return self.leave_insert();
-                }
-                Task::none()
-            }
-            Action::Reconnect => match &self.session {
+            Action::CloseTab => self.request_close_tab(),
+            Action::Reconnect => match self.tab() {
                 Some(s) if !s.is_live() => {
                     let target = s.target.clone();
-                    self.session = None;
-                    self.start_session(target)
+                    let name = s.custom_name.clone();
+                    let idx = self.active;
+                    self.start_session_at(target, idx, name)
                 }
                 Some(_) => Task::none(),
                 None => {
@@ -965,6 +1045,111 @@ impl State {
                     Task::none()
                 }
             },
+            Action::NewTab => self.go_home(),
+            Action::NextTab => self.cycle_tab(true),
+            Action::PrevTab => self.cycle_tab(false),
+            Action::JumpTab1
+            | Action::JumpTab2
+            | Action::JumpTab3
+            | Action::JumpTab4
+            | Action::JumpTab5
+            | Action::JumpTab6
+            | Action::JumpTab7
+            | Action::JumpTab8
+            | Action::JumpTab9 => match action.jump_index() {
+                Some(i) if i < self.tabs.len() => self.activate(i),
+                _ => Task::none(),
+            },
+            Action::RenameTab => match self.tab() {
+                Some(t) => {
+                    let (id, name) = (t.id, t.display_name().to_owned());
+                    self.open_prompt(Prompt::new(PromptKind::RenameTab(id), name))
+                }
+                None => Task::none(),
+            },
+            Action::DuplicateTab => match self.tab() {
+                Some(t) => {
+                    let target = t.target.clone();
+                    self.start_session_at(target, None, None)
+                }
+                None => Task::none(),
+            },
+            Action::TermPaste => {
+                if self.terminal_tab() {
+                    iced::clipboard::read().map(Message::Pasted)
+                } else {
+                    Task::none()
+                }
+            }
+            Action::TermSearch => self.open_search(),
+            Action::SearchNext => self.search_step(true),
+            Action::SearchPrev => self.search_step(false),
+            Action::CopyMode => {
+                if self.terminal_tab() {
+                    if let Some(t) = self.tab_mut() {
+                        t.term.copy_enter();
+                        t.refresh();
+                    }
+                    self.mode = Mode::Insert;
+                }
+                Task::none()
+            }
+            Action::ScrollPageUp | Action::ScrollPageDown => {
+                let up = action == Action::ScrollPageUp;
+                if let Some(t) = self.tab_mut() {
+                    if t.snap.modes.alt_screen {
+                        let bytes: &[u8] = if up { b"\x1b[5~" } else { b"\x1b[6~" };
+                        if let Some(h) = &t.handle {
+                            h.try_send(tern_ssh::SessionCommand::Write(bytes.to_vec().into()));
+                        }
+                    } else {
+                        t.term.scroll_pages(if up { 1 } else { -1 });
+                        t.refresh();
+                    }
+                }
+                Task::none()
+            }
+            Action::FontBigger | Action::FontSmaller | Action::FontReset => {
+                let size = &mut self.term_settings.font_size;
+                *size = match action {
+                    Action::FontBigger => *size + 1.0,
+                    Action::FontSmaller => *size - 1.0,
+                    _ => term_settings::DEFAULT_FONT_SIZE,
+                }
+                .clamp(term_settings::MIN_FONT_SIZE, term_settings::MAX_FONT_SIZE);
+                self.term_settings_changed(term_settings::FONT_SIZE)
+            }
+            Action::CycleScheme => {
+                self.term_settings.scheme = self.term_settings.scheme.next();
+                self.toast(
+                    ToastKind::Info,
+                    format!("Terminal colors: {}", self.term_settings.scheme),
+                );
+                self.term_settings_changed(term_settings::SCHEME)
+            }
+            Action::CycleCursor => {
+                self.term_settings.cursor = self.term_settings.cursor.next();
+                self.toast(
+                    ToastKind::Info,
+                    format!("Cursor: {}", self.term_settings.cursor.id()),
+                );
+                self.term_settings_changed(term_settings::CURSOR)
+            }
+            Action::ToggleBell => {
+                self.term_settings.visual_bell = !self.term_settings.visual_bell;
+                let on = self.term_settings.visual_bell;
+                self.toast(ToastKind::Info, format!("Visual bell {}", on_off(on)));
+                self.term_settings_changed(term_settings::VISUAL_BELL)
+            }
+            Action::TogglePasteWarn => {
+                self.term_settings.confirm_paste = !self.term_settings.confirm_paste;
+                let on = self.term_settings.confirm_paste;
+                self.toast(
+                    ToastKind::Info,
+                    format!("Multi-line paste warning {}", on_off(on)),
+                );
+                self.term_settings_changed(term_settings::CONFIRM_PASTE)
+            }
             Action::Filter => {
                 self.mode = Mode::Insert;
                 self.pane = Pane::List;
@@ -1019,7 +1204,7 @@ impl State {
             }
             Action::OpenPalette => match self.mode {
                 Mode::Palette => {
-                    self.mode = Mode::Normal;
+                    self.mode = self.resting_mode();
                     Task::none()
                 }
                 _ => {
@@ -1039,7 +1224,7 @@ impl State {
             }
             Action::PaletteRun => self.run_palette_selection(),
             Action::LockVault => {
-                self.close_session();
+                self.close_all_tabs();
                 let store = self.store.clone();
                 Task::perform(async move { store.lock().await }, |r| {
                     Message::Locked(r.map_err(|e| e.to_string()))
@@ -1081,12 +1266,8 @@ impl State {
             }
             return Task::none();
         }
-        if self.session.is_some() && self.modals.is_empty() {
-            if self.mode == Mode::Insert {
-                return self.leave_insert();
-            }
-            self.close_session();
-            return Task::none();
+        if self.active.is_some() && self.modals.is_empty() {
+            return self.back_in_tab();
         }
         match self.mode {
             Mode::Modal => {
@@ -1098,7 +1279,7 @@ impl State {
                 }
             }
             Mode::Palette => {
-                self.mode = Mode::Normal;
+                self.mode = self.resting_mode();
                 Task::none()
             }
             Mode::Insert => self.leave_insert(),
@@ -1121,7 +1302,7 @@ impl State {
         let Some(entry) = self.palette.selected_entry().cloned() else {
             return Task::none();
         };
-        self.mode = Mode::Normal;
+        self.mode = self.resting_mode();
         self.palette.record_use(&entry.recent_key);
         let save = {
             let store = self.store.clone();
@@ -1144,15 +1325,18 @@ impl State {
         Task::batch([save, run])
     }
 
-    /// Begin connecting to a saved host: resolve credentials, start the session actor.
+    /// Open a new tab and connect to `target`.
     fn start_session(&mut self, target: ConnTarget) -> Task<Message> {
-        if self.session.is_some() {
-            self.toast(
-                ToastKind::Info,
-                "A session is already open; close it first (Ctrl+Shift+W)",
-            );
-            return Task::none();
-        }
+        self.start_session_at(target, None, None)
+    }
+
+    /// Connect to `target` in a new tab, or replace tab `replace` (reconnect).
+    fn start_session_at(
+        &mut self,
+        target: ConnTarget,
+        replace: Option<usize>,
+        name: Option<String>,
+    ) -> Task<Message> {
         let label = match &target {
             ConnTarget::Saved(host_id) => self
                 .host_data
@@ -1163,13 +1347,34 @@ impl State {
         };
         self.next_session += 1;
         let id = self.next_session;
-        self.session = Some(SessionView::new(id, target.clone(), label));
+        let mut view = SessionView::new(
+            id,
+            target.clone(),
+            label,
+            self.term_size,
+            self.term_settings.scrollback,
+        );
+        view.custom_name = name;
+        let idx = match replace.filter(|i| *i < self.tabs.len()) {
+            Some(i) => {
+                self.tabs[i] = view;
+                i
+            }
+            None => {
+                self.tabs.push(view);
+                self.tabs.len() - 1
+            }
+        };
+        self.active = Some(idx);
         self.mode = Mode::Normal;
         self.matcher.reset();
         let store = self.store.clone();
+        let (cols, rows) = self.term_size;
         Task::perform(
             async move {
-                let params = sessions::resolve(&store, &target).await?;
+                let mut params = sessions::resolve(&store, &target).await?;
+                params.cols = cols as u32;
+                params.rows = rows as u32;
                 let known = std::sync::Arc::new(AppKnownHosts(store));
                 let (handle, rx) = tern_ssh::spawn(params, known);
                 Ok(Spawned {
@@ -1187,19 +1392,19 @@ impl State {
         result: Result<Spawned, String>,
     ) -> Task<Message> {
         match result {
-            Ok(spawned) => match &mut self.session {
-                Some(s) if s.id == id => {
+            Ok(spawned) => match self.tabs.iter_mut().find(|t| t.id == id) {
+                Some(s) => {
                     s.handle = Some(spawned.handle);
                     s.source = Some(spawned.source);
                 }
                 // Closed while starting: stop the orphaned actor.
-                _ => {
+                None => {
                     spawned.handle.try_send(tern_ssh::SessionCommand::Close);
                 }
             },
             Err(e) => {
-                if self.session.as_ref().is_some_and(|s| s.id == id) {
-                    self.session = None;
+                if let Some(i) = self.tab_index(id) {
+                    self.remove_tab(i);
                     self.toast(ToastKind::Error, e);
                 }
             }
@@ -1207,11 +1412,182 @@ impl State {
         Task::none()
     }
 
-    fn on_session_event(&mut self, id: SessionId, event: tern_ssh::SessionEvent) -> Task<Message> {
-        use tern_ssh::SessionEvent as E;
-        let Some(s) = self.session.as_mut().filter(|s| s.id == id) else {
+    fn tab(&self) -> Option<&SessionView> {
+        self.active.and_then(|i| self.tabs.get(i))
+    }
+
+    fn tab_mut(&mut self) -> Option<&mut SessionView> {
+        let i = self.active?;
+        self.tabs.get_mut(i)
+    }
+
+    fn tab_index(&self, id: SessionId) -> Option<usize> {
+        self.tabs.iter().position(|t| t.id == id)
+    }
+
+    /// The focused tab is a connected terminal.
+    fn terminal_tab(&self) -> bool {
+        self.tab()
+            .is_some_and(|t| matches!(t.phase, Phase::Connected))
+    }
+
+    /// Keys go to the remote: connected terminal tab in Insert mode, nothing else capturing keys.
+    fn terminal_focused(&self) -> bool {
+        self.mode == Mode::Insert
+            && self.modals.is_empty()
+            && self.prompt.is_none()
+            && self
+                .tab()
+                .is_some_and(|t| matches!(t.phase, Phase::Connected) && t.search.is_none())
+    }
+
+    /// Mode to return to after an overlay (palette, modal) closes.
+    fn resting_mode(&self) -> Mode {
+        if self.modals.is_empty() && self.terminal_tab() {
+            Mode::Insert
+        } else {
+            Mode::Normal
+        }
+    }
+
+    /// Focus tab `i`: terminals take keys immediately, auth prompts focus their field.
+    fn activate(&mut self, i: usize) -> Task<Message> {
+        if i >= self.tabs.len() {
+            return Task::none();
+        }
+        self.active = Some(i);
+        self.matcher.reset();
+        self.cursor_on = true;
+        self.tabs[i].cache.clear();
+        match self.tabs[i].phase {
+            Phase::Connected => {
+                self.mode = Mode::Insert;
+                iced::advanced::widget::operate(
+                    iced::advanced::widget::operation::focusable::unfocus(),
+                )
+            }
+            Phase::Auth { .. } => {
+                self.mode = Mode::Insert;
+                iced::widget::operation::focus(sessions::SESSION_INPUT_ID)
+            }
+            _ => {
+                self.mode = Mode::Normal;
+                Task::none()
+            }
+        }
+    }
+
+    /// Show the host list (to start another tab); tabs keep running.
+    fn go_home(&mut self) -> Task<Message> {
+        self.active = None;
+        self.mode = Mode::Normal;
+        self.matcher.reset();
+        Task::none()
+    }
+
+    fn cycle_tab(&mut self, forward: bool) -> Task<Message> {
+        let n = self.tabs.len();
+        if n == 0 {
+            return Task::none();
+        }
+        let next = match (self.active, forward) {
+            (None, true) => 0,
+            (None, false) => n - 1,
+            (Some(i), true) => (i + 1) % n,
+            (Some(i), false) => (i + n - 1) % n,
+        };
+        self.activate(next)
+    }
+
+    /// `Esc` inside a tab: cancel a connect, close search, leave the terminal, or go home.
+    fn back_in_tab(&mut self) -> Task<Message> {
+        let insert = self.mode == Mode::Insert;
+        let Some(t) = self.tab_mut() else {
             return Task::none();
         };
+        if t.search.take().is_some() {
+            t.refresh();
+            return iced::advanced::widget::operate(
+                iced::advanced::widget::operation::focusable::unfocus(),
+            );
+        }
+        match t.phase {
+            Phase::Connecting | Phase::HostKey | Phase::Auth { .. } => {
+                let Some(i) = self.active else {
+                    return Task::none();
+                };
+                self.remove_tab(i);
+                Task::none()
+            }
+            Phase::Connected if insert => self.leave_insert(),
+            _ => self.go_home(),
+        }
+    }
+
+    /// `Ctrl+Shift+W`: close the focused tab; ask first while the session is live.
+    fn request_close_tab(&mut self) -> Task<Message> {
+        let Some(t) = self.tab() else {
+            return Task::none();
+        };
+        if matches!(t.phase, Phase::Connected) {
+            let (id, name) = (t.id, t.display_name().to_owned());
+            self.modals.push(Modal::Confirm {
+                title: format!("Close '{name}'?"),
+                body: "The session is still connected and will be disconnected.".into(),
+                then: Pending::CloseTab(id),
+            });
+            self.sync_modal_mode();
+            return Task::none();
+        }
+        if let Some(i) = self.active {
+            self.remove_tab(i);
+        }
+        Task::none()
+    }
+
+    /// Disconnect and drop tab `i`, then focus a neighbour (or the host list).
+    fn remove_tab(&mut self, i: usize) {
+        if i >= self.tabs.len() {
+            return;
+        }
+        let tab = self.tabs.remove(i);
+        if let Some(h) = tab.handle {
+            h.try_send(tern_ssh::SessionCommand::Close);
+        }
+        self.active = match self.active {
+            Some(a) if a == i => (!self.tabs.is_empty()).then(|| i.min(self.tabs.len() - 1)),
+            Some(a) if a > i => Some(a - 1),
+            other => other,
+        };
+        self.modals.clear();
+        self.matcher.reset();
+        self.mode = if self.terminal_tab() {
+            Mode::Insert
+        } else {
+            Mode::Normal
+        };
+    }
+
+    fn close_all_tabs(&mut self) {
+        for t in self.tabs.drain(..) {
+            if let Some(h) = t.handle {
+                h.try_send(tern_ssh::SessionCommand::Close);
+            }
+        }
+        self.active = None;
+        self.modals.clear();
+        self.mode = Mode::Normal;
+        self.matcher.reset();
+    }
+
+    fn on_session_event(&mut self, id: SessionId, event: tern_ssh::SessionEvent) -> Task<Message> {
+        use tern_ssh::SessionEvent as E;
+        let Some(idx) = self.tab_index(id) else {
+            return Task::none();
+        };
+        let is_active = self.active == Some(idx);
+        let visual_bell = self.term_settings.visual_bell;
+        let s = &mut self.tabs[idx];
         match event {
             E::Connecting => s.phase = Phase::Connecting,
             E::HostKeyPrompt {
@@ -1222,6 +1598,7 @@ impl State {
                 changed_from,
             } => {
                 s.phase = Phase::HostKey;
+                self.active = Some(idx);
                 self.modals.push(Modal::HostKey {
                     host,
                     port,
@@ -1237,36 +1614,61 @@ impl State {
                 prompts,
             } => {
                 s.begin_auth(name, instructions, prompts);
+                self.active = Some(idx);
                 self.mode = Mode::Insert;
                 self.matcher.reset();
                 return iced::widget::operation::focus(sessions::SESSION_INPUT_ID);
             }
             E::Connected => {
                 s.phase = Phase::Connected;
-                s.log.note("Connected.");
-                self.mode = Mode::Insert;
-                self.matcher.reset();
+                s.cache.clear();
                 let host_id = match &s.target {
                     ConnTarget::Saved(id) => id.parse::<tern_core::HostId>().ok(),
                     ConnTarget::Quick(_) => None,
                 };
-                let focus = iced::widget::operation::focus(sessions::SESSION_INPUT_ID);
-                let Some(host_id) = host_id else {
-                    return focus;
-                };
-                let store = self.store.clone();
-                let touch = Task::perform(
-                    async move { store.touch_last_connected(host_id).await },
-                    |r| Message::SessionTouched(r.map_err(|e| e.to_string())),
-                );
-                let reload = self.reload_hosts();
-                return Task::batch([focus, touch.chain(reload)]);
+                let mut tasks = Vec::new();
+                if is_active && self.modals.is_empty() {
+                    self.mode = Mode::Insert;
+                    self.matcher.reset();
+                    tasks.push(iced::advanced::widget::operate(
+                        iced::advanced::widget::operation::focusable::unfocus(),
+                    ));
+                }
+                if let Some(host_id) = host_id {
+                    let store = self.store.clone();
+                    let touch = Task::perform(
+                        async move { store.touch_last_connected(host_id).await },
+                        |r| Message::SessionTouched(r.map_err(|e| e.to_string())),
+                    );
+                    let reload = self.reload_hosts();
+                    tasks.push(touch.chain(reload));
+                }
+                return Task::batch(tasks);
             }
-            E::Output(bytes) => s.log.push_bytes(&bytes),
+            E::Output(bytes) => {
+                s.term.feed(&bytes);
+                let replies = s.term.take_replies();
+                if !replies.is_empty()
+                    && let Some(h) = &s.handle
+                {
+                    h.try_send(tern_ssh::SessionCommand::Write(replies.into()));
+                }
+                let bell = s.term.take_bell() && visual_bell;
+                if bell {
+                    s.flash = true;
+                }
+                s.refresh();
+                if bell {
+                    return Task::perform(
+                        async { tokio::time::sleep(std::time::Duration::from_millis(150)).await },
+                        move |()| Message::FlashEnd(id),
+                    );
+                }
+            }
             E::Exited(_) | E::Closed => {
-                s.log.note("[connection closed]");
+                s.note("[connection closed]");
                 s.finish(None);
-                self.end_session_ui();
+                self.end_session_ui(is_active);
             }
             E::Error(e) => {
                 let host = match &s.target {
@@ -1275,43 +1677,271 @@ impl State {
                 }
                 .unwrap_or_else(|| s.label.clone());
                 let msg = sessions::friendly_error(&e, &host);
-                s.log.note(&format!("[{msg}]"));
+                s.note(&format!("[{msg}]"));
                 s.finish(Some(msg));
-                self.end_session_ui();
+                self.end_session_ui(is_active);
             }
         }
         Task::none()
     }
 
     /// After a session ends: drop any pending host-key modal and leave Insert mode.
-    fn end_session_ui(&mut self) {
-        self.modals.clear();
-        self.mode = Mode::Normal;
-        self.matcher.reset();
+    fn end_session_ui(&mut self, was_active: bool) {
+        if was_active {
+            self.modals.clear();
+            self.mode = Mode::Normal;
+            self.matcher.reset();
+        }
     }
 
     fn submit_session_input(&mut self) -> Task<Message> {
-        let Some(s) = &mut self.session else {
+        let Some(s) = self.tab_mut() else {
             return Task::none();
         };
         let Some(handle) = s.handle.clone() else {
             return Task::none();
         };
-        match s.phase {
-            Phase::Connected => {
-                let mut line = s.input.as_str().to_owned();
-                s.input.clear();
-                line.push('\n');
-                handle.try_send(tern_ssh::SessionCommand::Write(line.into()));
-            }
-            Phase::Auth { .. } => {
-                if let Some(answers) = s.answer() {
-                    handle.try_send(tern_ssh::SessionCommand::AuthResponse(answers));
-                }
-            }
-            _ => {}
+        if matches!(s.phase, Phase::Auth { .. })
+            && let Some(answers) = s.answer()
+        {
+            handle.try_send(tern_ssh::SessionCommand::AuthResponse(answers));
         }
         Task::none()
+    }
+
+    // ---- terminal input / events ----
+
+    /// Encode a key press for the remote shell.
+    fn send_raw_key(&mut self, raw: &keymap::RawKey) {
+        let Some(t) = self.tab_mut() else { return };
+        let Some(bytes) = tern_term::input::encode_key(
+            &raw.key,
+            raw.modifiers,
+            raw.text.as_deref(),
+            t.snap.modes.app_cursor,
+        ) else {
+            return;
+        };
+        if let Some(h) = &t.handle {
+            h.try_send(tern_ssh::SessionCommand::Write(bytes.into()));
+        }
+        // Typing returns to the live screen and drops any selection.
+        if t.snap.display_offset > 0 || t.term.has_selection() {
+            t.term.scroll_to_bottom();
+            t.term.clear_selection();
+            t.refresh();
+        }
+    }
+
+    fn write_to_tab(&self, bytes: Vec<u8>) {
+        if let Some(h) = self.tab().and_then(|t| t.handle.as_ref()) {
+            h.try_send(tern_ssh::SessionCommand::Write(bytes.into()));
+        }
+    }
+
+    fn on_term_event(&mut self, id: SessionId, ev: TermEvent) -> Task<Message> {
+        let Some(idx) = self.tab_index(id) else {
+            return Task::none();
+        };
+        let s = &mut self.tabs[idx];
+        match ev {
+            TermEvent::Resized { cols, rows } => {
+                s.term.resize(cols, rows);
+                s.refresh();
+                self.term_size = (cols, rows);
+                s.resize_gen += 1;
+                let gen_ = s.resize_gen;
+                return Task::perform(
+                    async { tokio::time::sleep(std::time::Duration::from_millis(50)).await },
+                    move |()| Message::ResizeFlush(id, gen_),
+                );
+            }
+            TermEvent::Scroll(n) => {
+                if s.snap.modes.alt_screen && s.snap.modes.alternate_scroll {
+                    // Full-screen apps without mouse support: the wheel acts as arrow keys.
+                    let key: &[u8] = match (n > 0, s.snap.modes.app_cursor) {
+                        (true, true) => b"\x1bOA",
+                        (true, false) => b"\x1b[A",
+                        (false, true) => b"\x1bOB",
+                        (false, false) => b"\x1b[B",
+                    };
+                    let bytes = key.repeat(n.unsigned_abs() as usize);
+                    if let Some(h) = &s.handle {
+                        h.try_send(tern_ssh::SessionCommand::Write(bytes.into()));
+                    }
+                } else {
+                    s.term.scroll(n);
+                    s.refresh();
+                }
+            }
+            TermEvent::SelectStart { kind, row, col } => {
+                s.term.start_selection(kind, row, col);
+                s.drag_moved = kind != SelectKind::Simple;
+                s.refresh();
+            }
+            TermEvent::SelectDrag { row, col } => {
+                s.term.update_selection(row, col);
+                s.drag_moved = true;
+                s.refresh();
+            }
+            TermEvent::SelectEnd => {
+                if !s.drag_moved {
+                    s.term.clear_selection();
+                    s.refresh();
+                }
+            }
+        }
+        Task::none()
+    }
+
+    // ---- clipboard / search / copy mode ----
+
+    fn term_copy(&mut self) -> Task<Message> {
+        let Some(t) = self.tab_mut() else {
+            return Task::none();
+        };
+        let text = if t.term.in_copy_mode() {
+            t.term.copy_yank()
+        } else {
+            t.term.selection_text()
+        };
+        t.term.clear_selection();
+        t.refresh();
+        match text {
+            Some(text) => {
+                let n = text.chars().count();
+                self.toast(ToastKind::Success, format!("Copied {n} characters"));
+                iced::clipboard::write(text)
+            }
+            None => {
+                self.toast(ToastKind::Info, "Nothing selected");
+                Task::none()
+            }
+        }
+    }
+
+    fn paste_text(&mut self, text: String) -> Task<Message> {
+        if !self.terminal_tab() || text.is_empty() {
+            return Task::none();
+        }
+        let lines = text.trim_end_matches(['\n', '\r']).lines().count();
+        if lines > 1 && self.term_settings.confirm_paste {
+            let preview: Vec<&str> = text.lines().take(3).collect();
+            self.modals.push(Modal::Confirm {
+                title: format!("Paste {lines} lines?"),
+                body: format!("{}…", preview.join("\n")),
+                then: Pending::Paste(text),
+            });
+            self.sync_modal_mode();
+            return Task::none();
+        }
+        self.send_paste(&text);
+        Task::none()
+    }
+
+    fn send_paste(&mut self, text: &str) {
+        let bracketed = self.tab().is_some_and(|t| t.snap.modes.bracketed_paste);
+        self.write_to_tab(tern_term::input::encode_paste(text, bracketed));
+        if let Some(t) = self.tab_mut() {
+            t.term.scroll_to_bottom();
+            t.refresh();
+        }
+    }
+
+    fn open_search(&mut self) -> Task<Message> {
+        let Some(t) = self.tab_mut() else {
+            return Task::none();
+        };
+        if t.search.is_none() {
+            t.search = Some(t.term.search_query().unwrap_or_default().to_owned());
+        }
+        self.mode = Mode::Insert;
+        self.matcher.reset();
+        iced::widget::operation::focus(sessions::SEARCH_INPUT_ID)
+    }
+
+    fn search_step(&mut self, forward: bool) -> Task<Message> {
+        if let Some(t) = self.tab_mut() {
+            t.term.search_step(forward);
+            t.refresh();
+        }
+        Task::none()
+    }
+
+    /// A key press while keyboard copy mode is active (vim-like).
+    fn copy_mode_key(&mut self, chord: &keymap::Chord) -> Task<Message> {
+        use iced::keyboard::key::Named;
+        let ctrl = chord.mods.control();
+        let shift = chord.mods.shift();
+        let motion = match &chord.key {
+            keymap::KeyId::Char('h') => Some(Motion::Left),
+            keymap::KeyId::Char('l') => Some(Motion::Right),
+            keymap::KeyId::Char('j') => Some(Motion::Down),
+            keymap::KeyId::Char('k') => Some(Motion::Up),
+            keymap::KeyId::Named(Named::ArrowLeft) => Some(Motion::Left),
+            keymap::KeyId::Named(Named::ArrowRight) => Some(Motion::Right),
+            keymap::KeyId::Named(Named::ArrowDown) => Some(Motion::Down),
+            keymap::KeyId::Named(Named::ArrowUp) => Some(Motion::Up),
+            keymap::KeyId::Char('0') | keymap::KeyId::Named(Named::Home) => Some(Motion::LineStart),
+            keymap::KeyId::Char('$') | keymap::KeyId::Named(Named::End) => Some(Motion::LineEnd),
+            keymap::KeyId::Char('w') => Some(Motion::WordForward),
+            keymap::KeyId::Char('b') => Some(Motion::WordBack),
+            keymap::KeyId::Char('g') if shift => Some(Motion::Bottom),
+            keymap::KeyId::Char('g') => Some(Motion::Top),
+            keymap::KeyId::Char('u') if ctrl => Some(Motion::HalfPageUp),
+            keymap::KeyId::Char('d') if ctrl => Some(Motion::HalfPageDown),
+            keymap::KeyId::Named(Named::PageUp) => Some(Motion::HalfPageUp),
+            keymap::KeyId::Named(Named::PageDown) => Some(Motion::HalfPageDown),
+            _ => None,
+        };
+        if let Some(m) = motion {
+            if let Some(t) = self.tab_mut() {
+                t.term.copy_move(m);
+                t.refresh();
+            }
+            return Task::none();
+        }
+        match &chord.key {
+            keymap::KeyId::Char('v') => {
+                if let Some(t) = self.tab_mut() {
+                    t.term.copy_toggle_select();
+                    t.refresh();
+                }
+                Task::none()
+            }
+            keymap::KeyId::Char('y') => self.term_copy(),
+            keymap::KeyId::Char('n') => self.search_step(!shift),
+            keymap::KeyId::Char('/') => {
+                if let Some(t) = self.tab_mut() {
+                    t.term.copy_exit();
+                    t.refresh();
+                }
+                self.open_search()
+            }
+            keymap::KeyId::Named(Named::Escape) | keymap::KeyId::Char('q') => {
+                if let Some(t) = self.tab_mut() {
+                    t.term.copy_exit();
+                    t.refresh();
+                }
+                Task::none()
+            }
+            _ => Task::none(),
+        }
+    }
+
+    /// Persist the terminal setting `key` and redraw every tab with it.
+    fn term_settings_changed(&mut self, key: &'static str) -> Task<Message> {
+        for t in &mut self.tabs {
+            t.cache.clear();
+        }
+        let Some(json) = self.term_settings.serialize(key) else {
+            return Task::none();
+        };
+        let store = self.store.clone();
+        Task::perform(
+            async move { store.query(move |db| db.settings().set(key, &json)).await },
+            |r| Message::SettingSaved(r.map_err(|e| e.to_string())),
+        )
     }
 
     /// Send the user's host-key decision to the actor.
@@ -1329,7 +1959,7 @@ impl State {
                 return Task::none();
             }
         };
-        if let Some(s) = &mut self.session {
+        if let Some(s) = self.tab_mut() {
             if let Some(h) = &s.handle {
                 h.try_send(tern_ssh::SessionCommand::HostKeyDecision(accept));
             }
@@ -1356,21 +1986,9 @@ impl State {
         )
     }
 
-    /// Disconnect and drop the session, if any.
-    fn close_session(&mut self) {
-        if let Some(s) = self.session.take()
-            && let Some(h) = s.handle
-        {
-            h.try_send(tern_ssh::SessionCommand::Close);
-        }
-        self.modals.clear();
-        self.mode = Mode::Normal;
-        self.matcher.reset();
-    }
-
     fn sync_modal_mode(&mut self) {
         self.mode = if self.modals.is_empty() {
-            Mode::Normal
+            self.resting_mode()
         } else {
             Mode::Modal
         };
@@ -1379,6 +1997,16 @@ impl State {
 
     fn run_pending(&mut self, pending: Pending) -> Task<Message> {
         match pending {
+            Pending::CloseTab(id) => {
+                if let Some(i) = self.tab_index(id) {
+                    self.remove_tab(i);
+                }
+                Task::none()
+            }
+            Pending::Paste(text) => {
+                self.send_paste(&text);
+                Task::none()
+            }
             Pending::DeleteSelected => {
                 let real = matches!(
                     self.section,
@@ -1445,6 +2073,13 @@ impl State {
         self.prompt = None;
         self.mode = Mode::Normal;
         self.matcher.reset();
+        if let PromptOutcome::RenameTab(id, name) = outcome {
+            if let Some(t) = self.tabs.iter_mut().find(|t| t.id == id) {
+                t.custom_name = (!name.is_empty()).then_some(name);
+            }
+            self.mode = self.resting_mode();
+            return Task::none();
+        }
         if let PromptOutcome::ExportKey(id, path) = outcome {
             let store = self.store.clone();
             return Task::perform(
@@ -1503,7 +2138,9 @@ impl State {
                         }
                         Ok(format!("Tagged {n} host(s)"))
                     }
-                    PromptOutcome::ExportKey(..) => Ok(String::new()),
+                    PromptOutcome::ExportKey(..) | PromptOutcome::RenameTab(..) => {
+                        Ok(String::new())
+                    }
                     PromptOutcome::MoveHost(host, group) => store
                         .set_host_group(host, group)
                         .await
@@ -1952,6 +2589,12 @@ impl State {
                                 recent: s.get(palette::RECENT_SETTING)?,
                                 theme: s.get("theme")?,
                                 reauth: s.get(reauth::SETTING)?,
+                                term: term_settings::KEYS
+                                    .iter()
+                                    .filter_map(|k| {
+                                        s.get(k).ok().flatten().map(|v| ((*k).to_owned(), v))
+                                    })
+                                    .collect(),
                             })
                         })
                         .await
@@ -2083,14 +2726,24 @@ impl State {
             .width(Fill)
             .style(container::bordered_box);
 
-        let base = column![row![sidebar, list_pane, detail].height(Fill), status_bar];
-        if let Some(s) = &self.session {
-            let session = sessions::view(s, self.form.spinner_frame);
-            return match self.modals.top() {
-                Some(m) => iced::widget::stack![session, modal::view(m, &self.keymap)].into(),
-                None => session,
-            };
-        }
+        let home = column![row![sidebar, list_pane, detail].height(Fill), status_bar];
+        let content: Element<'_, Message> = match self.tab() {
+            Some(s) => sessions::view(
+                s,
+                &sessions::ViewCtx {
+                    settings: &self.term_settings,
+                    spinner_frame: self.form.spinner_frame,
+                    cursor_on: self.cursor_on,
+                    focused: self.mode == Mode::Insert && self.modals.is_empty(),
+                },
+            ),
+            None => home.into(),
+        };
+        let base: Element<'_, Message> = if self.tabs.is_empty() {
+            content
+        } else {
+            column![sessions::tab_bar(&self.tabs, self.active), content].into()
+        };
         if let Some(form) = &self.host_form {
             return iced::widget::stack![base, host_form::view(form)].into();
         }
@@ -2111,7 +2764,7 @@ impl State {
             (None, Mode::Palette) => {
                 iced::widget::stack![base, palette::view(&self.palette)].into()
             }
-            (None, _) => base.into(),
+            (None, _) => base,
         }
     }
 
@@ -2126,15 +2779,20 @@ impl State {
                     .map(|_| Message::SpinnerTick),
             );
         }
-        if let Some(s) = &self.session {
+        for s in &self.tabs {
             if let Some(src) = &s.source {
                 subs.push(sessions::subscription(src));
             }
+        }
+        if let Some(s) = self.tab() {
             if matches!(s.phase, Phase::Connecting) {
                 subs.push(
                     iced::time::every(std::time::Duration::from_millis(120))
                         .map(|_| Message::SpinnerTick),
                 );
+            }
+            if s.snap.cursor_blinking && matches!(s.phase, Phase::Connected) {
+                subs.push(iced::time::every(tern_term::widget::BLINK).map(|_| Message::BlinkTick));
             }
         }
         if !self.toasts.is_empty() {
@@ -2236,6 +2894,42 @@ async fn load_hosts(store: &Store) -> tern_store::Result<HostsData> {
         identities: store.list_identities().await?,
         last_connected: store.host_last_connected().await?,
     })
+}
+
+fn on_off(on: bool) -> &'static str {
+    if on { "on" } else { "off" }
+}
+
+/// Chords that keep working inside keyboard copy mode (tab/lock/palette control).
+fn is_app_chord(chord: &keymap::Chord) -> bool {
+    let m = chord.mods;
+    (m.control() && m.shift())
+        || (m.control()
+            && matches!(
+                chord.key,
+                keymap::KeyId::Named(iced::keyboard::key::Named::Tab)
+            ))
+}
+
+/// Actions that stay available while a terminal tab is focused (list navigation does not).
+fn tab_action_allowed(action: Action) -> bool {
+    !matches!(
+        action,
+        Action::MoveDown
+            | Action::MoveUp
+            | Action::First
+            | Action::Last
+            | Action::PageDown
+            | Action::PageUp
+            | Action::Edit
+            | Action::Delete
+            | Action::Filter
+            | Action::Add
+            | Action::GoHosts
+            | Action::GoKeys
+            | Action::GoIdentities
+            | Action::GoTunnels
+    )
 }
 
 #[cfg(test)]
@@ -2419,7 +3113,7 @@ mod tests {
         let _ = s.update(Message::PaletteQueryChanged("prod-db".into()));
         let _ = s.update(Message::Dispatch(Action::PaletteRun));
         assert_eq!(s.mode, Mode::Normal);
-        let session = s.session.as_ref().expect("session started");
+        let session = s.tab().expect("session started");
         assert_eq!(session.label, "prod-db");
         assert_eq!(session.phase, Phase::Connecting);
     }
@@ -2458,10 +3152,7 @@ mod tests {
         let _ = s.update(Message::Dispatch(Action::Confirm));
         assert!(s.modals.is_empty());
         assert_eq!(s.mode, Mode::Normal);
-        assert_eq!(
-            s.session.as_ref().map(|x| &x.phase),
-            Some(&Phase::Connecting)
-        );
+        assert_eq!(s.tab().map(|x| &x.phase), Some(&Phase::Connecting));
     }
 
     #[test]
@@ -2482,7 +3173,7 @@ mod tests {
         let _ = s.update(host_key(None));
         let _ = s.update(Message::Dispatch(Action::Back));
         assert!(s.modals.is_empty());
-        assert!(s.session.is_some());
+        assert!(s.tab().is_some());
     }
 
     #[test]
@@ -2492,12 +3183,12 @@ mod tests {
             1,
             tern_ssh::SessionEvent::Error(tern_ssh::Error::Refused),
         ));
-        let session = s.session.as_ref().expect("kept for reconnect");
+        let session = s.tab().expect("kept for reconnect");
         assert!(matches!(&session.phase, Phase::Disconnected(Some(m)) if m.contains("refused")));
         // Events from a stale session id are ignored.
         let _ = s.update(Message::Session(99, tern_ssh::SessionEvent::Connected));
         let _ = s.update(Message::Dispatch(Action::Reconnect));
-        let session = s.session.as_ref().expect("new session");
+        let session = s.tab().expect("new session");
         assert_eq!(session.id, 2);
         assert_eq!(session.phase, Phase::Connecting);
     }
@@ -2508,7 +3199,132 @@ mod tests {
         let _ = s.update(Message::Dispatch(Action::GoKeys));
         assert_eq!(s.section, Section::Hosts);
         let _ = s.update(Message::Dispatch(Action::Back));
-        assert!(s.session.is_none(), "Esc in normal mode closes the session");
+        assert!(s.tabs.is_empty(), "Esc cancels a connection attempt");
+    }
+
+    fn connected_tabs(n: usize) -> State {
+        let mut s = main_state();
+        for i in 0..n {
+            let _ = s.start_session(ConnTarget::Quick(palette::QuickTarget {
+                user: "u".into(),
+                host: format!("h{i}"),
+                port: 22,
+            }));
+            let id = s.tabs[i].id;
+            let _ = s.update(Message::Session(id, tern_ssh::SessionEvent::Connected));
+        }
+        s
+    }
+
+    #[test]
+    fn connected_tab_takes_keys_and_esc_leaves_to_the_host_list() {
+        let mut s = connected_tabs(1);
+        assert_eq!(s.mode, Mode::Insert);
+        assert!(s.terminal_focused());
+        // Ctrl+Shift+Esc leaves the terminal, a second Esc goes to the host list.
+        let _ = s.update(Message::Dispatch(Action::Back));
+        assert_eq!(s.mode, Mode::Normal);
+        assert_eq!(s.active, Some(0));
+        let _ = s.update(Message::Dispatch(Action::Back));
+        assert_eq!(s.active, None);
+        assert_eq!(s.tabs.len(), 1, "the session keeps running");
+    }
+
+    #[test]
+    fn tabs_cycle_jump_and_new_tab_goes_home() {
+        let mut s = connected_tabs(3);
+        assert_eq!(s.active, Some(2));
+        let _ = s.update(Message::Dispatch(Action::NextTab));
+        assert_eq!(s.active, Some(0));
+        let _ = s.update(Message::Dispatch(Action::PrevTab));
+        assert_eq!(s.active, Some(2));
+        let _ = s.update(Message::Dispatch(Action::JumpTab2));
+        assert_eq!(s.active, Some(1));
+        // Out of range is ignored.
+        let _ = s.update(Message::Dispatch(Action::JumpTab9));
+        assert_eq!(s.active, Some(1));
+        let _ = s.update(Message::Dispatch(Action::NewTab));
+        assert_eq!(s.active, None);
+        let _ = s.update(Message::Dispatch(Action::NextTab));
+        assert_eq!(s.active, Some(0));
+        assert_eq!(s.mode, Mode::Insert);
+    }
+
+    #[test]
+    fn closing_a_live_tab_asks_first() {
+        let mut s = connected_tabs(2);
+        let _ = s.update(Message::Dispatch(Action::CloseTab));
+        assert_eq!(s.tabs.len(), 2);
+        assert!(matches!(s.modals.top(), Some(Modal::Confirm { .. })));
+        let _ = s.update(Message::Dispatch(Action::Cancel));
+        assert_eq!(s.tabs.len(), 2);
+        assert_eq!(s.mode, Mode::Insert);
+        let _ = s.update(Message::Dispatch(Action::CloseTab));
+        let _ = s.update(Message::Dispatch(Action::Confirm));
+        assert_eq!(s.tabs.len(), 1);
+        assert_eq!(s.active, Some(0));
+    }
+
+    #[test]
+    fn output_reaches_the_emulator_of_its_own_tab() {
+        let mut s = connected_tabs(2);
+        let (a, b) = (s.tabs[0].id, s.tabs[1].id);
+        let _ = s.update(Message::Session(
+            a,
+            tern_ssh::SessionEvent::Output(b"hello\r\n".as_slice().into()),
+        ));
+        assert_eq!(s.tabs[0].snap.row_text(0), "hello");
+        assert_eq!(s.tabs[1].snap.row_text(0), "");
+        let _ = b;
+    }
+
+    #[test]
+    fn widget_resize_updates_emulator_and_new_session_size() {
+        let mut s = connected_tabs(1);
+        let id = s.tabs[0].id;
+        let _ = s.update(Message::Term(
+            id,
+            TermEvent::Resized {
+                cols: 100,
+                rows: 30,
+            },
+        ));
+        assert_eq!((s.tabs[0].snap.cols, s.tabs[0].snap.rows), (100, 30));
+        assert_eq!(s.term_size, (100, 30));
+    }
+
+    #[test]
+    fn rename_tab_sets_and_clears_the_custom_name() {
+        let mut s = connected_tabs(1);
+        let id = s.tabs[0].id;
+        let _ = s.update(Message::Dispatch(Action::RenameTab));
+        let _ = s.update(Message::PromptChanged("prod".into()));
+        let _ = s.update(Message::PromptSubmit);
+        assert_eq!(s.tabs[0].display_name(), "prod");
+        assert_eq!(s.mode, Mode::Insert);
+        let _ = s.update(Message::Dispatch(Action::RenameTab));
+        let _ = s.update(Message::PromptChanged(String::new()));
+        let _ = s.update(Message::PromptSubmit);
+        assert_eq!(s.tabs[0].display_name(), "u@h0");
+        let _ = id;
+    }
+
+    #[test]
+    fn multiline_paste_is_confirmed_single_line_is_not() {
+        let mut s = connected_tabs(1);
+        let _ = s.update(Message::Pasted(Some("one line\n".into())));
+        assert!(s.modals.is_empty());
+        let _ = s.update(Message::Pasted(Some("a\nb\nc".into())));
+        assert!(matches!(
+            s.modals.top(),
+            Some(Modal::Confirm {
+                then: Pending::Paste(_),
+                ..
+            })
+        ));
+        let _ = s.update(Message::Dispatch(Action::Cancel));
+        assert!(s.modals.is_empty());
+        assert_eq!(s.mode, Mode::Insert);
     }
 
     #[test]

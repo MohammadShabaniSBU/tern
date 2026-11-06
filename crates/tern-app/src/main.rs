@@ -16,6 +16,7 @@ mod paths;
 mod prompt;
 mod reauth;
 mod sessions;
+mod term_settings;
 mod toast;
 
 use app::State;

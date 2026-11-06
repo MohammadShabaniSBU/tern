@@ -6,7 +6,8 @@ pub mod theme;
 pub mod widget;
 
 pub use emu::{
-    Cell, CellFlags, Color, Cursor, CursorShape, Emulator, Modes, RowSpan, SelectKind, Snapshot,
+    Cell, CellFlags, Color, Cursor, CursorShape, Emulator, Modes, Motion, RowSpan, SelectKind,
+    Snapshot,
 };
 
 /// Errors produced by `tern-term`.

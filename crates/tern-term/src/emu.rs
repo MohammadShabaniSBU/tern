@@ -96,6 +96,8 @@ pub struct Snapshot {
     pub selection: Vec<RowSpan>,
     pub matches: Vec<RowSpan>,
     pub current_match: Option<RowSpan>,
+    /// Keyboard copy mode is active (`cursor` is the copy cursor).
+    pub copy_mode: bool,
 }
 
 impl Snapshot {
@@ -191,6 +193,40 @@ pub struct Emulator {
     listener: Listener,
     size: Size,
     search: Option<SearchState>,
+    copy: Option<CopyState>,
+}
+
+/// Keyboard copy-mode cursor, in grid coordinates (negative lines are scrollback).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CopyState {
+    line: i32,
+    col: usize,
+    anchor: Option<(i32, usize)>,
+}
+
+/// Copy-mode cursor motions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Motion {
+    Left,
+    Right,
+    Up,
+    Down,
+    LineStart,
+    LineEnd,
+    WordForward,
+    WordBack,
+    Top,
+    Bottom,
+    HalfPageUp,
+    HalfPageDown,
+}
+
+impl std::fmt::Debug for Emulator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Emulator")
+            .field("size", &(self.size.cols, self.size.rows))
+            .finish()
+    }
 }
 
 const MIN_COLS: usize = 2;
@@ -213,6 +249,7 @@ impl Emulator {
             listener,
             size,
             search: None,
+            copy: None,
         }
     }
 
@@ -335,6 +372,184 @@ impl Emulator {
 
     pub fn selection_text(&self) -> Option<String> {
         self.term.selection_to_string().filter(|s| !s.is_empty())
+    }
+
+    // ---- keyboard copy mode ----
+
+    pub fn in_copy_mode(&self) -> bool {
+        self.copy.is_some()
+    }
+
+    pub fn copy_enter(&mut self) {
+        let cur = self.term.grid().cursor.point;
+        self.copy = Some(CopyState {
+            line: cur.line.0,
+            col: cur.column.0,
+            anchor: None,
+        });
+        self.reveal_copy_cursor();
+    }
+
+    pub fn copy_exit(&mut self) {
+        self.copy = None;
+        self.term.selection = None;
+    }
+
+    pub fn copy_selecting(&self) -> bool {
+        self.copy.is_some_and(|c| c.anchor.is_some())
+    }
+
+    /// `v`: start or cancel a selection at the copy cursor.
+    pub fn copy_toggle_select(&mut self) {
+        let Some(c) = self.copy.as_mut() else { return };
+        if c.anchor.is_some() {
+            c.anchor = None;
+            self.term.selection = None;
+        } else {
+            c.anchor = Some((c.line, c.col));
+            self.apply_copy_selection();
+        }
+    }
+
+    /// `y`: the selected text (or the cursor line when nothing is selected); leaves copy mode.
+    pub fn copy_yank(&mut self) -> Option<String> {
+        let c = self.copy?;
+        if c.anchor.is_none() {
+            let line = self.line_text(c.line);
+            self.copy_exit();
+            return Some(line.trim_end().to_string());
+        }
+        let text = self.term.selection_to_string();
+        self.copy_exit();
+        text.filter(|t| !t.is_empty())
+    }
+
+    fn line_text(&self, line: i32) -> String {
+        let row = &self.term.grid()[Line(line)];
+        (0..self.size.cols)
+            .filter(|&c| !row[Column(c)].flags.contains(Flags::WIDE_CHAR_SPACER))
+            .map(|c| row[Column(c)].c)
+            .collect()
+    }
+
+    pub fn copy_move(&mut self, motion: Motion) {
+        let Some(mut c) = self.copy else { return };
+        let grid = self.term.grid();
+        let top = grid.topmost_line().0;
+        let bottom = grid.bottommost_line().0;
+        let last_col = self.size.cols - 1;
+        let page = i32::try_from(self.size.rows).unwrap_or(24);
+        let is_word = |ch: char| ch.is_alphanumeric() || ch == '_';
+        match motion {
+            Motion::Left => c.col = c.col.saturating_sub(1),
+            Motion::Right => c.col = (c.col + 1).min(last_col),
+            Motion::Up => c.line = (c.line - 1).max(top),
+            Motion::Down => c.line = (c.line + 1).min(bottom),
+            Motion::LineStart => c.col = 0,
+            Motion::LineEnd => {
+                let text: Vec<char> = self.line_text(c.line).chars().collect();
+                c.col = text.iter().rposition(|&ch| ch != ' ').unwrap_or(0);
+            }
+            Motion::Top => {
+                c.line = top;
+                c.col = 0;
+            }
+            Motion::Bottom => {
+                c.line = bottom;
+                c.col = 0;
+            }
+            Motion::HalfPageUp => c.line = (c.line - page / 2).max(top),
+            Motion::HalfPageDown => c.line = (c.line + page / 2).min(bottom),
+            Motion::WordForward => {
+                let mut text: Vec<char> = self.line_text(c.line).chars().collect();
+                let mut i = c.col;
+                let mut line = c.line;
+                let start_class = text.get(i).map(|&ch| is_word(ch));
+                // Skip the rest of the current word, then blanks.
+                while i < text.len() && Some(is_word(text[i])) == start_class && text[i] != ' ' {
+                    i += 1;
+                }
+                loop {
+                    while i < text.len() && text[i] == ' ' {
+                        i += 1;
+                    }
+                    if i < text.len() {
+                        break;
+                    }
+                    if line >= bottom {
+                        i = text.len().saturating_sub(1);
+                        break;
+                    }
+                    line += 1;
+                    text = self.line_text(line).chars().collect();
+                    i = 0;
+                }
+                c.line = line;
+                c.col = i.min(last_col);
+            }
+            Motion::WordBack => {
+                let mut line = c.line;
+                let mut text: Vec<char> = self.line_text(line).chars().collect();
+                let mut i = c.col as i64 - 1;
+                loop {
+                    while i >= 0 && text[i as usize] == ' ' {
+                        i -= 1;
+                    }
+                    if i >= 0 {
+                        break;
+                    }
+                    if line <= top {
+                        i = 0;
+                        break;
+                    }
+                    line -= 1;
+                    text = self.line_text(line).chars().collect();
+                    i = text.len() as i64 - 1;
+                }
+                let class = is_word(text[i as usize]);
+                while i > 0 && text[i as usize - 1] != ' ' && is_word(text[i as usize - 1]) == class
+                {
+                    i -= 1;
+                }
+                c.line = line;
+                c.col = i as usize;
+            }
+        }
+        self.copy = Some(c);
+        self.reveal_copy_cursor();
+        self.apply_copy_selection();
+    }
+
+    fn apply_copy_selection(&mut self) {
+        let Some(c) = self.copy else { return };
+        let Some((al, ac)) = c.anchor else { return };
+        let forward = (c.line, c.col) >= (al, ac);
+        let (a_side, c_side) = if forward {
+            (Direction::Left, Direction::Right)
+        } else {
+            (Direction::Right, Direction::Left)
+        };
+        let mut sel = Selection::new(
+            SelectionType::Simple,
+            Point::new(Line(al), Column(ac)),
+            a_side,
+        );
+        sel.update(Point::new(Line(c.line), Column(c.col)), c_side);
+        self.term.selection = Some(sel);
+    }
+
+    /// Scroll so the copy cursor is inside the viewport.
+    fn reveal_copy_cursor(&mut self) {
+        let Some(c) = self.copy else { return };
+        let off = i32::try_from(self.display_offset()).unwrap_or(0);
+        let rows = i32::try_from(self.size.rows).unwrap_or(1);
+        let view_top = -off;
+        if c.line < view_top {
+            self.term.scroll_display(Scroll::Delta(view_top - c.line));
+        } else if c.line > view_top + rows - 1 {
+            self.term
+                .scroll_display(Scroll::Delta(view_top + rows - 1 - c.line));
+        }
     }
 
     // ---- search ----
@@ -465,6 +680,18 @@ impl Emulator {
             None
         };
 
+        let cursor = match self.copy {
+            Some(c) => {
+                let r = i64::from(c.line) + i64::from(off_i);
+                (0..rows as i64).contains(&r).then_some(Cursor {
+                    col: c.col.min(cols - 1),
+                    row: r as usize,
+                    shape: CursorShape::Block,
+                })
+            }
+            None => cursor,
+        };
+
         let to_view = |line: i32| -> Option<usize> {
             let r = i64::from(line) + i64::from(off_i);
             (0..rows as i64).contains(&r).then_some(r as usize)
@@ -521,6 +748,7 @@ impl Emulator {
             selection,
             matches,
             current_match,
+            copy_mode: self.copy.is_some(),
         }
     }
 }
@@ -585,6 +813,52 @@ fn convert_cell(c: &alacritty_terminal::term::cell::Cell) -> Cell {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copy_mode_selects_and_yanks() {
+        let mut e = emu(20, 3);
+        e.feed(b"hello world\r\nsecond line");
+        e.copy_enter();
+        assert!(e.in_copy_mode());
+        e.copy_move(Motion::Up);
+        e.copy_move(Motion::LineStart);
+        e.copy_toggle_select();
+        e.copy_move(Motion::WordForward);
+        e.copy_move(Motion::Left);
+        e.copy_move(Motion::Left);
+        assert_eq!(e.copy_yank().as_deref(), Some("hello"));
+        assert!(!e.in_copy_mode());
+        assert!(!e.has_selection());
+    }
+
+    #[test]
+    fn copy_mode_yank_line_and_scroll_follows() {
+        let mut e = emu(10, 3);
+        for i in 0..10 {
+            e.feed(format!("line{i}\r\n").as_bytes());
+        }
+        e.copy_enter();
+        e.copy_move(Motion::Top);
+        assert!(e.display_offset() > 0);
+        let snap = e.snapshot();
+        assert!(snap.copy_mode);
+        assert_eq!(snap.cursor.map(|c| c.row), Some(0));
+        assert_eq!(e.copy_yank().as_deref(), Some("line0"));
+        e.copy_enter();
+        e.copy_move(Motion::Bottom);
+        assert_eq!(e.display_offset(), 0);
+    }
+
+    #[test]
+    fn copy_word_back_and_backward_selection() {
+        let mut e = emu(30, 2);
+        e.feed(b"foo bar baz");
+        e.copy_enter();
+        e.copy_move(Motion::LineEnd);
+        e.copy_toggle_select();
+        e.copy_move(Motion::WordBack);
+        assert_eq!(e.copy_yank().as_deref(), Some("baz"));
+    }
 
     fn emu(cols: usize, rows: usize) -> Emulator {
         Emulator::new(cols, rows, 100)

@@ -12,6 +12,10 @@ use crate::keymap::Keymap;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Pending {
     DeleteSelected,
+    /// Close the tab with this session id (its session is still live).
+    CloseTab(crate::sessions::SessionId),
+    /// Paste this multi-line text into the focused terminal.
+    Paste(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

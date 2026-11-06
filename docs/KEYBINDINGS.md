@@ -30,12 +30,13 @@ A remote shell needs `Ctrl+A`, `Ctrl+W`, `Ctrl+K`, etc. So while a terminal is f
 | `Ctrl+Shift+T` | New tab from host picker |
 | `Ctrl+Shift+W` | Close current tab |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous tab |
-| `Ctrl+Shift+1..9` | Jump to tab N |
+| `Ctrl+Shift+1..9` (also `Ctrl+1..9` inside a terminal) | Jump to tab N |
+| `Ctrl+Shift+R` / `Ctrl+Shift+D` | Rename / duplicate tab |
 | `Ctrl+Shift+L` | Lock vault |
 | `Ctrl+,` | Settings |
 | `F1` / `?` (Normal) | Keybinding cheat sheet |
 
-### SSH session (Sprint 4; a single session until tabs arrive in Sprint 5)
+### SSH session
 
 | Keys | Action |
 |---|---|
@@ -43,10 +44,10 @@ A remote shell needs `Ctrl+A`, `Ctrl+W`, `Ctrl+K`, etc. So while a terminal is f
 | `y` / `Enter` | Host-key dialog, first connection: trust and save |
 | `n` / `Esc` | Host-key dialog: abort |
 | `Shift+R` | Host-key dialog, **changed** key: replace the stored key (`y`/`Enter` do nothing here) |
-| `Enter` (Normal) | Focus the input line |
-| `Esc` | Leave the input line; `Esc` again closes the session |
+| `Enter` (Normal) | Send keys to the remote again (Insert mode) |
+| `Ctrl+Shift+Esc` | Leave the terminal (Normal mode); `Esc` then shows the host list. `Esc` while connecting cancels |
 | `r` (Normal, disconnected) | Reconnect |
-| `Ctrl+Shift+W` | Disconnect and close |
+| `Ctrl+Shift+W` | Close the tab (asks first while connected) |
 
 ### Normal mode — lists (hosts, keys, identities, tunnels)
 
@@ -75,12 +76,21 @@ A remote shell needs `Ctrl+A`, `Ctrl+W`, `Ctrl+K`, etc. So while a terminal is f
 
 ### Terminal (Insert mode)
 
+Everything except `Ctrl+Shift+<key>`, the leader, `Ctrl+Tab`, `Ctrl+1..9/0/=/-` and `Shift+PageUp/Down` goes to the remote.
+
 | Keys | Action |
 |---|---|
-| `Ctrl+Shift+C` / `Ctrl+Shift+V` | Copy / paste |
-| `Shift+PageUp` / `Shift+PageDown` | Scrollback |
-| `Ctrl+Shift+F` | Search scrollback |
+| `Ctrl+Shift+C` / `Ctrl+Shift+V` | Copy selection / paste (multi-line paste asks first; `term.paste_warn` toggles) |
+| Mouse drag / double / triple click | Select text / word / line |
+| `Shift+PageUp` / `Shift+PageDown`, mouse wheel | Scrollback (sent through to full-screen apps) |
+| `Ctrl+Shift+F` | Search scrollback; `Enter` next, `Ctrl+Shift+Alt+G` previous, `Esc` closes |
+| `Ctrl+Shift+G` | Next search match |
+| `Ctrl+Shift+Space` | Keyboard copy mode |
 | `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | Font size up / down / reset |
 | `Ctrl+Shift+Esc` | Back to Normal mode |
+
+Copy mode: `h j k l`/arrows move, `w`/`b` word, `0`/`$` line ends, `g`/`G` top/bottom, `Ctrl+U`/`Ctrl+D` half page, `v` start/stop selection, `y` copy (the current line if nothing selected), `n`/`N` next/previous search match, `/` search, `Esc`/`q` exit.
+
+Palette-only actions: cycle color scheme (dark / light / solarized), cycle cursor style, toggle visual bell. Further preferences live in the `settings` table: `term.font_size`, `term.scrollback` (default 10000), `term.font` (system family), `term.scheme`, `term.cursor`.
 
 All bindings are overridable in settings (stored in the `settings` table as JSON).

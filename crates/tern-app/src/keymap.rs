@@ -396,7 +396,9 @@ fn intercepts(km: &Keymap, ctx: Context, first: &Chord) -> bool {
     if ctx.terminal {
         // The remote shell owns plain Ctrl/Alt chords; only Ctrl+Shift+<key> and the leader
         // belong to the app.
-        return first.is_leader_like(km.leader()) || (first.mods.control() && first.mods.shift());
+        return first.is_leader_like(km.leader())
+            || (first.mods.control() && first.mods.shift())
+            || terminal_shortcut(first);
     }
     if ctx.mode == ModeMask::INSERT {
         // A text field owns plain characters; app chords need a modifier (or be a named key
@@ -404,6 +406,20 @@ fn intercepts(km: &Keymap, ctx: Context, first: &Chord) -> bool {
         return app_mods || matches!(first.key, KeyId::Named(_));
     }
     true
+}
+
+/// A few non-Ctrl+Shift chords the app keeps even while a remote terminal has focus
+/// (docs/KEYBINDINGS.md): Ctrl+Tab, Ctrl+1..9 / Ctrl+0 / Ctrl+= / Ctrl+- (shift is dropped from
+/// symbol chords), and Shift+PageUp/PageDown for scrollback.
+fn terminal_shortcut(first: &Chord) -> bool {
+    match &first.key {
+        KeyId::Named(Named::Tab) => first.mods.control() && !first.mods.alt(),
+        KeyId::Named(Named::PageUp | Named::PageDown) => first.mods == Modifiers::SHIFT,
+        KeyId::Char(c) => {
+            first.mods == Modifiers::CTRL && (c.is_ascii_digit() || matches!(c, '=' | '-' | '+'))
+        }
+        _ => false,
+    }
 }
 
 fn lookup(km: &Keymap, ctx: Context, seq: &[Chord]) -> Lookup {
@@ -453,11 +469,30 @@ pub fn auth_subscription() -> Subscription<Message> {
 /// the matcher's mode rules decide what is ours.
 pub fn main_subscription() -> Subscription<Message> {
     event::listen_with(|event, _status, _window| match event {
-        Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
-            Chord::from_event(&key, modifiers).map(Message::Key)
+        Event::Keyboard(keyboard::Event::KeyPressed {
+            key,
+            modifiers,
+            text,
+            ..
+        }) => {
+            let chord = Chord::from_event(&key, modifiers)?;
+            let raw = RawKey {
+                key,
+                modifiers,
+                text: text.map(|t| t.to_string()),
+            };
+            Some(Message::Key(chord, raw))
         }
         _ => None,
     })
+}
+
+/// The unprocessed key press, kept so a focused terminal can encode it for the remote.
+#[derive(Debug, Clone)]
+pub struct RawKey {
+    pub key: Key,
+    pub modifiers: Modifiers,
+    pub text: Option<String>,
 }
 
 #[cfg(test)]
