@@ -163,6 +163,8 @@ actions! {
     CopyPublicKey => "key.copy_public", "Copy public key",     List, ["shift+y"], N;
     ToggleMark   => "list.mark",      "Mark/unmark for bulk actions", List, ["space"], N;
     BulkTag      => "host.tag",       "Add tags to marked hosts", List, ["shift+t"], N;
+    RevealStored => "identity.reveal", "Reveal stored password (asks master password)", List, ["shift+r"], N;
+    ExportKey    => "key.export",     "Export private key to file (asks master password)", List, ["shift+e"], N;
     Duplicate    => "item.duplicate", "Duplicate selected",    List, ["y"], N;
     ToggleTunnels => "item.tunnels",  "Start/stop host tunnels", List, ["t"], N;
     // Forms

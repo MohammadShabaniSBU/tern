@@ -2,7 +2,7 @@
 
 use iced::widget::{column, container, text, text_input};
 use iced::{Color, Element, Fill, Theme};
-use tern_core::{Group, GroupId, HostId};
+use tern_core::{Group, GroupId, HostId, KeyId};
 
 use crate::app::Message;
 
@@ -19,6 +19,8 @@ pub enum PromptKind {
     MoveHost(HostId),
     /// Comma-separated tags added to every listed host.
     BulkTag(Vec<HostId>),
+    /// Destination file for an exported private key.
+    ExportKey(KeyId),
 }
 
 #[derive(Debug, Clone)]
@@ -35,6 +37,7 @@ pub enum PromptOutcome {
     RenameGroup(GroupId, String),
     MoveHost(HostId, Option<GroupId>),
     AddTags(Vec<HostId>, Vec<String>),
+    ExportKey(KeyId, String),
 }
 
 impl Prompt {
@@ -52,6 +55,7 @@ impl Prompt {
             PromptKind::RenameGroup(_) => "Rename group",
             PromptKind::MoveHost(_) => "Move to group (empty = none)",
             PromptKind::BulkTag(_) => "Add tags (comma separated)",
+            PromptKind::ExportKey(_) => "Export private key to file",
         }
     }
 
@@ -91,6 +95,12 @@ impl Prompt {
                     return Err("a group with that name already exists here".into());
                 }
                 Ok(PromptOutcome::RenameGroup(*id, name.to_owned()))
+            }
+            PromptKind::ExportKey(id) => {
+                if name.is_empty() {
+                    return Err("enter a file path".into());
+                }
+                Ok(PromptOutcome::ExportKey(*id, name.to_owned()))
             }
             PromptKind::BulkTag(hosts) => {
                 let tags: Vec<String> = name

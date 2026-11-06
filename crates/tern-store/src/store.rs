@@ -176,6 +176,16 @@ impl Store {
         .await
     }
 
+    /// Check `password` against the stored vault without changing the lock state.
+    pub async fn verify_password(&self, password: SecretString) -> Result<()> {
+        self.run(move |db| {
+            let meta = db.vault_meta().get()?.ok_or(Error::NoVault)?;
+            Vault::unlock(&password, &meta)?;
+            Ok(())
+        })
+        .await
+    }
+
     /// Drop the data key. Secret operations fail with [`Error::Locked`] until unlocked again.
     pub async fn lock(&self) -> Result<()> {
         self.run(|db| {
@@ -494,6 +504,21 @@ mod tests {
         ));
         assert!(!store.is_unlocked().await.unwrap());
         store.unlock(pw("master")).await.unwrap();
+        assert!(store.is_unlocked().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn verify_password_checks_without_changing_lock_state() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .create_vault_with_params(pw("master"), fast())
+            .await
+            .unwrap();
+        store.verify_password(pw("master")).await.unwrap();
+        assert!(matches!(
+            store.verify_password(pw("nope")).await,
+            Err(Error::Vault(tern_vault::Error::WrongPassword))
+        ));
         assert!(store.is_unlocked().await.unwrap());
     }
 

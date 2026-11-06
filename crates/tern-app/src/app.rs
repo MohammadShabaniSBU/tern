@@ -19,6 +19,7 @@ use crate::list::{self, ListState};
 use crate::modal::{self, Modal, ModalStack, Pending};
 use crate::palette::{self, HostRef, Palette, Target};
 use crate::prompt::{self, Prompt, PromptKind, PromptOutcome};
+use crate::reauth::{self, Gate, ReauthPrompt, SensitiveOp};
 use crate::toast::{ToastKind, Toasts};
 
 /// Which part of the app owns the keyboard. See `docs/KEYBINDINGS.md`.
@@ -119,6 +120,10 @@ pub struct State {
     identity_form: Option<IdentityForm>,
     /// Incremented per password copy so only the latest copy's timer clears the clipboard.
     clip_token: u64,
+    gate: Gate,
+    reauth: Option<ReauthPrompt>,
+    /// A stored identity password the user explicitly revealed: `(identity id, password)`.
+    revealed: Option<(String, Sensitive)>,
     prompt: Option<Prompt>,
     palette: Palette,
 }
@@ -130,6 +135,7 @@ pub struct LoadedSettings {
     keymap: Option<String>,
     recent: Option<String>,
     theme: Option<String>,
+    reauth: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -186,6 +192,10 @@ pub enum Message {
     IdentitySave,
     IdentitySaved(Result<String, String>),
     ClipboardClear(u64),
+    ReauthPassword(Sensitive),
+    ReauthSubmit,
+    ReauthDone(Result<(), AuthFailure>),
+    PasswordRevealed(Result<Option<Sensitive>, String>),
     PromptChanged(String),
     PromptSubmit,
     /// A group/move operation finished; the string is a toast message.
@@ -222,6 +232,9 @@ impl State {
             ids_data: IdentitiesData::default(),
             identity_form: None,
             clip_token: 0,
+            gate: Gate::default(),
+            reauth: None,
+            revealed: None,
             prompt: None,
             palette: Palette::default(),
         };
@@ -338,6 +351,7 @@ impl State {
                         self.dark = loaded.theme.as_deref().map(str::trim) != Some("\"light\"");
                         self.keymap =
                             Keymap::build(loaded.leader.as_deref(), loaded.keymap.as_deref());
+                        self.gate.set_minutes_from_setting(loaded.reauth.as_deref());
                         self.matcher.reset();
                         let problems = self.keymap.warnings.len() + self.keymap.conflicts.len();
                         if problems > 0 {
@@ -377,6 +391,68 @@ impl State {
                 Task::none()
             }
             Message::FormSave => self.save_host_form(),
+            Message::ReauthPassword(v) => {
+                if let Some(r) = &mut self.reauth {
+                    r.password = v;
+                    r.error = None;
+                }
+                Task::none()
+            }
+            Message::ReauthSubmit => {
+                let Some(r) = &mut self.reauth else {
+                    return Task::none();
+                };
+                if r.busy || r.password.is_empty() {
+                    return Task::none();
+                }
+                r.busy = true;
+                let password = r.password.take_secret();
+                let store = self.store.clone();
+                Task::perform(
+                    async move {
+                        store
+                            .verify_password(password)
+                            .await
+                            .map_err(|e| AuthFailure::from_store(&e))
+                    },
+                    Message::ReauthDone,
+                )
+            }
+            Message::ReauthDone(Ok(())) => {
+                let Some(r) = self.reauth.take() else {
+                    return Task::none();
+                };
+                self.gate.mark_verified(Instant::now());
+                self.mode = Mode::Normal;
+                self.matcher.reset();
+                self.run_sensitive(r.then)
+            }
+            Message::ReauthDone(Err(f)) => {
+                if let Some(r) = &mut self.reauth {
+                    r.busy = false;
+                    r.password.clear();
+                    r.error = Some(f.message());
+                }
+                iced::widget::operation::focus(reauth::REAUTH_ID)
+            }
+            Message::PasswordRevealed(Ok(Some(pw))) => {
+                if let Some((id, _)) = &self.revealed {
+                    let id = id.clone();
+                    self.revealed = Some((id, pw));
+                }
+                Task::none()
+            }
+            Message::PasswordRevealed(Ok(None)) => {
+                self.revealed = None;
+                self.toast(ToastKind::Info, "This identity has no stored password");
+                Task::none()
+            }
+            Message::PasswordRevealed(Err(e)) => {
+                self.revealed = None;
+                tracing::error!(error = %e, "could not reveal password");
+                self.toast(ToastKind::Error, "Could not read the password");
+                Task::none()
+            }
             Message::KeysLoaded(r) => {
                 if let Err(e) = &r {
                     tracing::error!(error = %e, "could not load keys");
@@ -512,6 +588,9 @@ impl State {
                 self.prompt = None;
                 self.key_form = None;
                 self.identity_form = None;
+                self.reauth = None;
+                self.revealed = None;
+                self.gate.reset();
                 self.ids_data = IdentitiesData::default();
                 self.keys_data = KeysData::default();
                 self.modals.clear();
@@ -527,6 +606,23 @@ impl State {
             return Task::none();
         }
         tracing::debug!(action = action.meta().id, "dispatch");
+        // A revealed password must not follow the selection around.
+        if self.revealed.is_some()
+            && (action.section().is_some()
+                || matches!(
+                    action,
+                    Action::MoveDown
+                        | Action::MoveUp
+                        | Action::First
+                        | Action::Last
+                        | Action::PageDown
+                        | Action::PageUp
+                        | Action::Filter
+                        | Action::LockVault
+                ))
+        {
+            self.revealed = None;
+        }
         if let Some(section) = action.section() {
             self.section = section;
             return self.scroll_list(false);
@@ -631,6 +727,29 @@ impl State {
                     Message::GroupsChanged,
                 )
             }
+            Action::RevealStored if self.section == Section::Identities => {
+                let id = self
+                    .list()
+                    .selected_item()
+                    .and_then(|i| i.id.as_deref())
+                    .and_then(|id| id.parse().ok());
+                match id {
+                    Some(id) => self.request_sensitive(SensitiveOp::RevealPassword(id)),
+                    None => Task::none(),
+                }
+            }
+            Action::ExportKey if self.section == Section::Keys => {
+                let id = self
+                    .list()
+                    .selected_item()
+                    .and_then(|i| i.id.as_deref())
+                    .and_then(|id| id.parse().ok());
+                match id {
+                    Some(id) => self.request_sensitive(SensitiveOp::ExportKey(id)),
+                    None => Task::none(),
+                }
+            }
+            Action::RevealStored | Action::ExportKey => Task::none(),
             Action::ToggleMark | Action::BulkTag | Action::Duplicate => Task::none(),
             Action::Add if self.section == Section::Keys => {
                 self.open_key_form(KeyForm::new(KeyMode::Generate))
@@ -831,6 +950,12 @@ impl State {
 
     /// `Esc`: move one step outwards. Modal -> palette -> insert -> clear the filter.
     fn back(&mut self) -> Task<Message> {
+        if self.reauth.take().is_some() {
+            return self.leave_insert();
+        }
+        if self.revealed.take().is_some() {
+            return Task::none();
+        }
         if self.identity_form.take().is_some() {
             return self.leave_insert();
         }
@@ -982,6 +1107,23 @@ impl State {
         self.prompt = None;
         self.mode = Mode::Normal;
         self.matcher.reset();
+        if let PromptOutcome::ExportKey(id, path) = outcome {
+            let store = self.store.clone();
+            return Task::perform(
+                async move {
+                    let pem = store
+                        .get_key_private(id)
+                        .await
+                        .map_err(|e| e.to_string())?
+                        .ok_or("key has no private part")?;
+                    let dest = expand_home(&path);
+                    write_private_file(&dest, secrecy::ExposeSecret::expose_secret(&pem))
+                        .map_err(|e| format!("{}: {e}", dest.display()))?;
+                    Ok(format!("Exported to {}", dest.display()))
+                },
+                Message::GroupsChanged,
+            );
+        }
         if matches!(outcome, PromptOutcome::AddTags(..)) {
             self.lists[0].clear_marks();
         }
@@ -1023,6 +1165,7 @@ impl State {
                         }
                         Ok(format!("Tagged {n} host(s)"))
                     }
+                    PromptOutcome::ExportKey(..) => Ok(String::new()),
                     PromptOutcome::MoveHost(host, group) => store
                         .set_host_group(host, group)
                         .await
@@ -1032,6 +1175,52 @@ impl State {
             },
             Message::GroupsChanged,
         )
+    }
+
+    /// Run `op` now if the master password was proven recently, else ask for it first.
+    fn request_sensitive(&mut self, op: SensitiveOp) -> Task<Message> {
+        if !self.gate.needs_password(Instant::now()) {
+            return self.run_sensitive(op);
+        }
+        self.reauth = Some(ReauthPrompt::new(op));
+        self.mode = Mode::Insert;
+        self.matcher.reset();
+        iced::widget::operation::focus(reauth::REAUTH_ID)
+    }
+
+    fn run_sensitive(&mut self, op: SensitiveOp) -> Task<Message> {
+        match op {
+            SensitiveOp::RevealPassword(id) => {
+                // Placeholder until the password arrives; the detail pane shows it only for
+                // this identity and it is dropped on Esc, lock, or selecting another row.
+                self.revealed = Some((id.to_string(), Sensitive::default()));
+                let store = self.store.clone();
+                Task::perform(
+                    async move {
+                        store
+                            .get_identity_password(id)
+                            .await
+                            .map(|p| {
+                                p.map(|p| {
+                                    Sensitive::new(
+                                        secrecy::ExposeSecret::expose_secret(&p).to_owned(),
+                                    )
+                                })
+                            })
+                            .map_err(|e| e.to_string())
+                    },
+                    Message::PasswordRevealed,
+                )
+            }
+            SensitiveOp::ExportKey(id) => {
+                let label = self
+                    .keys_data
+                    .key(&id.to_string())
+                    .map(|k| k.label.clone())
+                    .unwrap_or_else(|| "key".into());
+                self.open_prompt(Prompt::new(PromptKind::ExportKey(id), format!("~/{label}")))
+            }
+        }
     }
 
     fn any_form_open(&self) -> bool {
@@ -1397,6 +1586,7 @@ impl State {
     }
 
     fn enter_main(&mut self) -> Task<Message> {
+        self.gate.mark_verified(Instant::now());
         self.form = AuthForm::default();
         self.screen = Screen::Main;
         self.mode = Mode::Normal;
@@ -1418,6 +1608,7 @@ impl State {
                                 keymap: s.get("keymap")?,
                                 recent: s.get(palette::RECENT_SETTING)?,
                                 theme: s.get("theme")?,
+                                reauth: s.get(reauth::SETTING)?,
                             })
                         })
                         .await
@@ -1501,7 +1692,18 @@ impl State {
             Some(item) if self.section == Section::Identities && item.id.is_some() => item
                 .id
                 .as_deref()
-                .and_then(|id| self.ids_data.detail(id, &self.keys_data.keys))
+                .and_then(|id| {
+                    let mut t = self.ids_data.detail(id, &self.keys_data.keys)?;
+                    if let Some((rid, pw)) = &self.revealed
+                        && rid == id
+                    {
+                        t.push_str(&format!(
+                            "\n\nRevealed password (Esc hides):\n{}",
+                            pw.as_str()
+                        ));
+                    }
+                    Some(t)
+                })
                 .unwrap_or_else(|| item.label.clone()),
             Some(item) => format!(
                 "{}\n\n(details arrive with the {} screen, Sprint 3)",
@@ -1544,6 +1746,9 @@ impl State {
         }
         if let Some(p) = &self.prompt {
             return iced::widget::stack![base, prompt::view(p)].into();
+        }
+        if let Some(r) = &self.reauth {
+            return iced::widget::stack![base, reauth::view(r)].into();
         }
         if let Some(f) = &self.key_form {
             return iced::widget::stack![base, key_form::view(f)].into();
@@ -1619,6 +1824,19 @@ fn selected_row_style(theme: &Theme, selected: bool) -> container::Style {
 /// Bundled monospace font (JetBrains Mono, SIL OFL 1.1; licence in `assets/fonts/OFL.txt`).
 pub const FONT_BYTES: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf");
 pub const MONO: Font = Font::with_name("JetBrains Mono");
+
+/// Create `path` exclusively (never overwrites) with owner-only permissions.
+fn write_private_file(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    opts.open(path)?.write_all(contents.as_bytes())
+}
 
 /// `~/` -> home directory; anything else unchanged.
 fn expand_home(path: &str) -> std::path::PathBuf {
@@ -1841,6 +2059,36 @@ mod tests {
         let _ = s.update(Message::Dispatch(Action::PaletteRun));
         assert_eq!(s.mode, Mode::Normal);
         assert!(s.toasts.current().is_some());
+    }
+
+    #[test]
+    fn exported_key_files_are_private_and_never_overwritten() {
+        let path = std::env::temp_dir().join(format!("tern-export-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        write_private_file(&path, "secret").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "secret");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o077, 0);
+        }
+        assert!(write_private_file(&path, "other").is_err());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn reauth_is_required_until_verified_and_esc_cancels() {
+        let mut s = main_state();
+        s.gate.reset();
+        let _ = s.update(Message::Dispatch(Action::GoKeys));
+        s.lists[1].replace_items(vec![
+            crate::list::Item::leaf("k", 0).with_id(tern_core::KeyId::new().to_string()),
+        ]);
+        let _ = s.update(Message::Dispatch(Action::ExportKey));
+        assert!(s.reauth.is_some() && s.mode == Mode::Insert);
+        let _ = s.update(Message::Dispatch(Action::Back));
+        assert!(s.reauth.is_none() && s.mode == Mode::Normal);
     }
 
     #[test]
