@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::validate::{validate_hostname, validate_label, validate_port, validate_username};
-use crate::{GroupId, HostId, IdentityId, KeyId, TunnelId, ValidationError};
+use crate::{GroupId, HostId, IdentityId, KeyId, KnownHostId, TunnelId, ValidationError};
 
 /// A folder for organising hosts. Groups may nest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,6 +97,24 @@ impl SshKeyMeta {
     }
 }
 
+/// A server host key we have seen and trusted (trust-on-first-use).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KnownHost {
+    pub id: KnownHostId,
+    pub host: String,
+    pub port: u16,
+    pub key_type: String,
+    pub fingerprint: String,
+    pub public_key: String,
+}
+
+impl KnownHost {
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        validate_hostname(&self.host)?;
+        validate_port(self.port)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TunnelKind {
@@ -114,6 +132,16 @@ impl TunnelKind {
             Self::Local => "local",
             Self::Remote => "remote",
             Self::Dynamic => "dynamic",
+        }
+    }
+
+    /// Inverse of [`TunnelKind::as_str`].
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "local" => Some(Self::Local),
+            "remote" => Some(Self::Remote),
+            "dynamic" => Some(Self::Dynamic),
+            _ => None,
         }
     }
 }
@@ -228,6 +256,14 @@ mod tests {
         assert_eq!(serde_json::from_str::<HostId>(&json).unwrap(), id);
         assert_eq!(id.to_string().parse::<HostId>().unwrap(), id);
         assert_ne!(HostId::new(), HostId::new());
+    }
+
+    #[test]
+    fn tunnel_kind_parse_round_trips() {
+        for kind in [TunnelKind::Local, TunnelKind::Remote, TunnelKind::Dynamic] {
+            assert_eq!(TunnelKind::parse(kind.as_str()), Some(kind));
+        }
+        assert_eq!(TunnelKind::parse("bogus"), None);
     }
 
     #[test]

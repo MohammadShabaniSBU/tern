@@ -6,8 +6,8 @@ mod model;
 mod validate;
 
 pub use error::ValidationError;
-pub use ids::{GroupId, HostId, IdentityId, KeyId, TunnelId};
-pub use model::{Group, Host, Identity, SshKeyMeta, Tunnel, TunnelKind};
+pub use ids::{GroupId, HostId, IdentityId, KeyId, KnownHostId, TunnelId};
+pub use model::{Group, Host, Identity, KnownHost, SshKeyMeta, Tunnel, TunnelKind};
 pub use validate::{
     MAX_LABEL_LEN, validate_hostname, validate_label, validate_port, validate_username,
 };

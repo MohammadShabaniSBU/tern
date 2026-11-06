@@ -57,3 +57,5 @@ id_type!(/// Identifies a [`Tunnel`](crate::Tunnel).
     TunnelId);
 id_type!(/// Identifies a [`Group`](crate::Group).
     GroupId);
+id_type!(/// Identifies a [`KnownHost`](crate::KnownHost).
+    KnownHostId);
