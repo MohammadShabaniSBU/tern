@@ -10,6 +10,7 @@ use crate::action::ModeMask;
 use crate::action::{Action, Section};
 use crate::auth::{self, AuthFailure, AuthForm, CONFIRM_ID, PASSWORD_ID, Sensitive, retry_delay};
 use crate::keymap::{self, Chord, Context, Keymap, Matcher, Outcome};
+use crate::list::{self, ListState};
 
 /// Which part of the app owns the keyboard. See `docs/KEYBINDINGS.md`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -92,7 +93,7 @@ pub struct State {
     pub mode: Mode,
     pub section: Section,
     pub pane: Pane,
-    pub filter: String,
+    lists: [ListState; 4],
     form: AuthForm,
     keymap: Keymap,
     matcher: Matcher,
@@ -124,6 +125,8 @@ pub enum Message {
     KeymapLoaded(Result<(Option<String>, Option<String>), String>),
     Locked(Result<(), String>),
     FilterChanged(String),
+    /// `(offset_y, viewport_height)` reported by the list's scrollable.
+    ListScrolled(f32, f32),
     /// Enter in the filter input: keep the filter, return to Normal mode.
     FilterSubmitted,
 }
@@ -142,7 +145,7 @@ impl State {
             mode: Mode::Normal,
             section: Section::default(),
             pane: Pane::default(),
-            filter: String::new(),
+            lists: Section::ALL.map(|sec| ListState::new(list::dummy_items(sec))),
             form: AuthForm::default(),
             keymap: Keymap::defaults(),
             matcher: Matcher::default(),
@@ -244,7 +247,11 @@ impl State {
                 Task::none()
             }
             Message::FilterChanged(text) => {
-                self.filter = text;
+                self.list_mut().set_filter(text);
+                self.scroll_list(true)
+            }
+            Message::ListScrolled(y, h) => {
+                self.list_mut().viewport_changed(y, h);
                 Task::none()
             }
             Message::FilterSubmitted => self.leave_insert(),
@@ -270,7 +277,7 @@ impl State {
         tracing::debug!(action = action.meta().id, "dispatch");
         if let Some(section) = action.section() {
             self.section = section;
-            return Task::none();
+            return self.scroll_list(false);
         }
         match action {
             Action::Back => self.back(),
@@ -280,12 +287,45 @@ impl State {
                 iced::widget::operation::focus(FILTER_ID)
             }
             Action::Collapse => {
-                self.pane = Pane::Sidebar;
-                Task::none()
+                if self.pane == Pane::List && !self.list_mut().collapse() {
+                    self.pane = Pane::Sidebar;
+                }
+                self.scroll_list(false)
             }
             Action::Expand => {
-                self.pane = Pane::List;
-                Task::none()
+                if self.pane == Pane::Sidebar {
+                    self.pane = Pane::List;
+                } else {
+                    self.list_mut().expand();
+                }
+                self.scroll_list(false)
+            }
+            Action::MoveDown | Action::MoveUp if self.pane == Pane::Sidebar => {
+                let n = Section::ALL.len() as isize;
+                let i = Section::ALL
+                    .iter()
+                    .position(|&s| s == self.section)
+                    .unwrap_or(0) as isize;
+                let step = if action == Action::MoveDown { 1 } else { -1 };
+                self.section = Section::ALL[(i + step).clamp(0, n - 1) as usize];
+                self.scroll_list(false)
+            }
+            Action::MoveDown
+            | Action::MoveUp
+            | Action::First
+            | Action::Last
+            | Action::PageDown
+            | Action::PageUp => {
+                let list = self.list_mut();
+                match action {
+                    Action::MoveDown => list.move_by(1),
+                    Action::MoveUp => list.move_by(-1),
+                    Action::First => list.first(),
+                    Action::Last => list.last(),
+                    Action::PageDown => list.page(true),
+                    _ => list.page(false),
+                }
+                self.scroll_list(false)
             }
             Action::OpenPalette => {
                 self.mode = match self.mode {
@@ -315,10 +355,56 @@ impl State {
             }
             Mode::Insert => self.leave_insert(),
             Mode::Normal => {
-                self.filter.clear();
-                Task::none()
+                if self.list().filter.is_empty() {
+                    Task::none()
+                } else {
+                    self.list_mut().set_filter(String::new());
+                    self.scroll_list(true)
+                }
             }
         }
+    }
+
+    fn list(&self) -> &ListState {
+        &self.lists[self.section_index()]
+    }
+
+    fn list_mut(&mut self) -> &mut ListState {
+        let i = self.section_index();
+        &mut self.lists[i]
+    }
+
+    fn section_index(&self) -> usize {
+        Section::ALL
+            .iter()
+            .position(|&s| s == self.section)
+            .unwrap_or(0)
+    }
+
+    /// Scroll the shared scrollable so the active list's selection is visible. `reset` jumps to
+    /// the top first (filter changes).
+    fn scroll_list(&mut self, reset: bool) -> Task<Message> {
+        let list = self.list_mut();
+        if reset {
+            list.set_offset(0.0);
+        }
+        let target = list.reveal_offset();
+        if let Some(y) = target {
+            list.set_offset(y);
+        }
+        let y = if reset || target.is_some() {
+            target.unwrap_or(0.0)
+        } else {
+            // Switching lists: restore this list's remembered position.
+            list.offset()
+        };
+        iced::widget::operation::scroll_to(
+            list::LIST_ID,
+            iced::widget::scrollable::AbsoluteOffset {
+                x: None,
+                y: Some(y),
+            },
+        )
     }
 
     fn leave_insert(&mut self) -> Task<Message> {
@@ -456,11 +542,15 @@ impl State {
                 None => "Vault unlocked".to_owned(),
             },
         };
-        let filter = text_input("Filter (/)", &self.filter)
+        let filter = text_input("Filter (/)", &self.list().filter)
             .id(FILTER_ID)
             .on_input(Message::FilterChanged)
             .on_submit(Message::FilterSubmitted);
-        let main_area = container(column![filter, text(main_text).size(18)].spacing(12))
+        let list = list::view(
+            self.list(),
+            self.pane == Pane::List && self.mode == Mode::Normal,
+        );
+        let main_area = container(column![filter, text(main_text).size(14), list].spacing(12))
             .padding(12)
             .width(Fill)
             .height(Fill);
@@ -559,16 +649,16 @@ mod tests {
     #[test]
     fn esc_moves_one_step_outwards() {
         let mut s = main_state();
-        s.filter = "prod".into();
+        s.list_mut().set_filter("prod".into());
 
         // Insert -> Normal keeps the filter; the next Esc clears it.
         let _ = s.update(Message::Dispatch(Action::Filter));
         assert_eq!((s.mode, s.pane), (Mode::Insert, Pane::List));
         let _ = s.update(Message::Dispatch(Action::Back));
         assert_eq!(s.mode, Mode::Normal);
-        assert_eq!(s.filter, "prod");
+        assert_eq!(s.list().filter, "prod");
         let _ = s.update(Message::Dispatch(Action::Back));
-        assert!(s.filter.is_empty());
+        assert!(s.list().filter.is_empty());
 
         // Palette -> Normal.
         let _ = s.update(Message::Dispatch(Action::OpenPalette));
@@ -584,17 +674,45 @@ mod tests {
         let _ = s.update(Message::FilterChanged("x".into()));
         let _ = s.update(Message::FilterSubmitted);
         assert_eq!(s.mode, Mode::Normal);
-        assert_eq!(s.filter, "x");
+        assert_eq!(s.list().filter, "x");
     }
 
     #[test]
     fn pane_focus_always_has_a_value_and_h_l_move_it() {
         let mut s = main_state();
+        let _ = s.update(Message::Dispatch(Action::GoKeys)); // flat list: nothing to collapse
         assert_eq!(s.pane, Pane::List);
         let _ = s.update(Message::Dispatch(Action::Collapse));
         assert_eq!(s.pane, Pane::Sidebar);
         let _ = s.update(Message::Dispatch(Action::Expand));
         assert_eq!(s.pane, Pane::List);
+    }
+
+    #[test]
+    fn jk_move_the_selection_and_gg_and_capital_g_jump() {
+        let mut s = main_state();
+        let _ = s.update(Message::Dispatch(Action::GoKeys));
+        for _ in 0..3 {
+            let _ = s.update(Message::Dispatch(Action::MoveDown));
+        }
+        assert_eq!(s.list().selected_row(), Some(3));
+        let _ = s.update(Message::Dispatch(Action::MoveUp));
+        assert_eq!(s.list().selected_row(), Some(2));
+        let _ = s.update(Message::Dispatch(Action::Last));
+        assert_eq!(s.list().selected_row(), Some(999));
+        let _ = s.update(Message::Dispatch(Action::First));
+        assert_eq!(s.list().selected_row(), Some(0));
+    }
+
+    #[test]
+    fn jk_in_the_sidebar_switch_sections() {
+        let mut s = main_state();
+        s.pane = Pane::Sidebar;
+        let _ = s.update(Message::Dispatch(Action::MoveDown));
+        assert_eq!(s.section, Section::Keys);
+        let _ = s.update(Message::Dispatch(Action::MoveUp));
+        let _ = s.update(Message::Dispatch(Action::MoveUp));
+        assert_eq!(s.section, Section::Hosts);
     }
 
     #[test]
