@@ -1,6 +1,12 @@
-//! tern-term: stub (filled in by a later sprint).
+//! tern-term: terminal emulation adapter (and, later, the iced widget).
 
-/// Errors produced by `tern-term`. Variants are added as functionality lands.
+pub mod emu;
+
+pub use emu::{
+    Cell, CellFlags, Color, Cursor, CursorShape, Emulator, Modes, RowSpan, SelectKind, Snapshot,
+};
+
+/// Errors produced by `tern-term`.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("{0}")]
