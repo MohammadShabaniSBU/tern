@@ -1,6 +1,7 @@
 mod action;
 mod app;
 mod auth;
+mod autolock;
 mod cheatsheet;
 mod host_form;
 mod hosts_view;

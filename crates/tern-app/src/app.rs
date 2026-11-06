@@ -9,6 +9,7 @@ use tern_store::Store;
 use crate::action::ModeMask;
 use crate::action::{Action, Section};
 use crate::auth::{self, AuthFailure, AuthForm, CONFIRM_ID, PASSWORD_ID, Sensitive, retry_delay};
+use crate::autolock::{self, AutoLock};
 use crate::host_form::{self, Choice, Field, HostForm, Picker};
 use crate::hosts_view::{HostSort, HostsData};
 use crate::identity_form::{self, IdField, IdentitiesData, IdentityForm};
@@ -139,6 +140,9 @@ pub struct State {
     tunnels_loaded: bool,
     /// Incremented per password copy so only the latest copy's timer clears the clipboard.
     clip_token: u64,
+    /// A copied password may still be on the clipboard (cleared on lock).
+    secret_on_clipboard: bool,
+    autolock: AutoLock,
     gate: Gate,
     reauth: Option<ReauthPrompt>,
     /// A stored identity password the user explicitly revealed: `(identity id, password)`.
@@ -165,6 +169,7 @@ pub struct LoadedSettings {
     theme: Option<String>,
     reauth: Option<String>,
     term: Vec<(String, String)>,
+    lock: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone)]
@@ -191,6 +196,9 @@ pub enum Message {
     SettingsLoaded(Result<LoadedSettings, String>),
     PaletteQueryChanged(String),
     SettingSaved(Result<(), String>),
+    /// Mouse click/scroll; only resets the idle timer.
+    Activity,
+    AutoLockTick(std::time::SystemTime),
     Locked(Result<(), String>),
     ToastTick(Instant),
     FilterChanged(String),
@@ -316,6 +324,8 @@ impl State {
             ids_data: IdentitiesData::default(),
             identity_form: None,
             clip_token: 0,
+            secret_on_clipboard: false,
+            autolock: AutoLock::new(std::time::SystemTime::now()),
             gate: Gate::default(),
             reauth: None,
             revealed: None,
@@ -332,7 +342,18 @@ impl State {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        if matches!(message, Message::Key(..) | Message::Activity) {
+            self.autolock.touch(std::time::SystemTime::now());
+        }
         match message {
+            Message::Activity => Task::none(),
+            Message::AutoLockTick(now) => {
+                if self.screen == Screen::Main && self.autolock.should_lock(now) {
+                    tracing::info!("auto-lock: idle timeout");
+                    return self.dispatch(Action::LockVault);
+                }
+                Task::none()
+            }
             Message::VaultChecked(Ok(exists)) => {
                 self.screen = if exists {
                     Screen::Unlock
@@ -459,6 +480,9 @@ impl State {
                         self.gate.set_minutes_from_setting(loaded.reauth.as_deref());
                         for (k, v) in &loaded.term {
                             self.term_settings.apply(k, v);
+                        }
+                        for (k, v) in &loaded.lock {
+                            self.autolock.apply(k, v);
                         }
                         for t in &mut self.tabs {
                             t.term.set_scrollback(self.term_settings.scrollback);
@@ -653,6 +677,7 @@ impl State {
             }
             Message::ClipboardClear(token) => {
                 if token == self.clip_token {
+                    self.secret_on_clipboard = false;
                     iced::clipboard::write(String::new())
                 } else {
                     Task::none()
@@ -765,7 +790,9 @@ impl State {
                 self.host_form = None;
                 self.tunnel_form = None;
                 self.tunnels_data = TunnelsData::default();
-                self.stop_all_tunnels();
+                if !self.autolock.keep_sessions {
+                    self.stop_all_tunnels();
+                }
                 self.tunnels_loaded = false;
                 self.autostart_pending = false;
                 self.prompt = None;
@@ -778,7 +805,13 @@ impl State {
                 self.ids_data = IdentitiesData::default();
                 self.keys_data = KeysData::default();
                 self.modals.clear();
-                self.close_all_tabs();
+                if self.autolock.keep_sessions {
+                    // Sessions keep running behind the lock screen; only drop UI state.
+                    self.mode = Mode::Normal;
+                    self.matcher.reset();
+                } else {
+                    self.close_all_tabs();
+                }
                 iced::widget::operation::focus(PASSWORD_ID)
             }
             Message::SessionSpawned(id, result) => self.on_session_spawned(id, result),
@@ -1357,12 +1390,19 @@ impl State {
             }
             Action::PaletteRun => self.run_palette_selection(),
             Action::LockVault => {
-                self.stop_all_tunnels();
-                self.close_all_tabs();
+                if !self.autolock.keep_sessions {
+                    self.stop_all_tunnels();
+                    self.close_all_tabs();
+                }
                 let store = self.store.clone();
-                Task::perform(async move { store.lock().await }, |r| {
+                let lock = Task::perform(async move { store.lock().await }, |r| {
                     Message::Locked(r.map_err(|e| e.to_string()))
-                })
+                });
+                if self.secret_on_clipboard {
+                    self.secret_on_clipboard = false;
+                    return Task::batch([iced::clipboard::write(String::new()), lock]);
+                }
+                lock
             }
             // Registered for the keymap/palette; implemented by later tasks and sprints.
             other => {
@@ -2394,6 +2434,7 @@ impl State {
                 }
                 let pw = form.password.as_str().to_owned();
                 self.clip_token += 1;
+                self.secret_on_clipboard = true;
                 let token = self.clip_token;
                 self.toast(
                     ToastKind::Success,
@@ -2647,6 +2688,12 @@ impl State {
             .tunnels
             .iter()
             .filter(|t| t.auto_start)
+            .filter(|t| {
+                !self
+                    .tunnel_status
+                    .get(&t.id)
+                    .is_some_and(TunStatus::is_running)
+            })
             .map(|t| t.id.to_string())
             .collect();
         self.refresh_tunnel_rows();
@@ -3038,6 +3085,12 @@ impl State {
                                         s.get(k).ok().flatten().map(|v| ((*k).to_owned(), v))
                                     })
                                     .collect(),
+                                lock: autolock::KEYS
+                                    .iter()
+                                    .filter_map(|k| {
+                                        s.get(k).ok().flatten().map(|v| ((*k).to_owned(), v))
+                                    })
+                                    .collect(),
                             })
                         })
                         .await
@@ -3290,6 +3343,12 @@ impl State {
             if s.snap.cursor_blinking && matches!(s.phase, Phase::Connected) {
                 subs.push(iced::time::every(tern_term::widget::BLINK).map(|_| Message::BlinkTick));
             }
+        }
+        if self.screen == Screen::Main && self.autolock.enabled() {
+            subs.push(
+                iced::time::every(autolock::TICK)
+                    .map(|_| Message::AutoLockTick(std::time::SystemTime::now())),
+            );
         }
         if !self.toasts.is_empty() {
             subs.push(
@@ -3923,6 +3982,48 @@ mod tests {
         let mut s = main_state();
         let _ = s.update(Message::Locked(Ok(())));
         assert_eq!(s.screen, Screen::Unlock);
+    }
+
+    fn tab(id: u64) -> SessionView {
+        SessionView::new(id, ConnTarget::Saved("h".into()), "h".into(), (80, 24), 100)
+    }
+
+    #[test]
+    fn locking_closes_tabs_unless_sessions_are_kept() {
+        let mut s = main_state();
+        s.tabs.push(tab(1));
+        let _ = s.update(Message::Locked(Ok(())));
+        assert!(s.tabs.is_empty());
+
+        let mut s = main_state();
+        s.autolock.keep_sessions = true;
+        s.tabs.push(tab(1));
+        let _ = s.update(Message::Locked(Ok(())));
+        assert_eq!(s.screen, Screen::Unlock);
+        assert_eq!(s.tabs.len(), 1);
+    }
+
+    #[test]
+    fn idle_tick_locks_only_on_the_main_screen_and_when_enabled() {
+        let now = std::time::SystemTime::now();
+        let later = now + std::time::Duration::from_secs(3600);
+        let mut s = main_state();
+        s.autolock = AutoLock::new(now);
+        s.autolock.idle_minutes = 0;
+        let _ = s.update(Message::AutoLockTick(later));
+        assert_eq!(s.screen, Screen::Main);
+
+        s.autolock.idle_minutes = 1;
+        s.secret_on_clipboard = true;
+        let _ = s.update(Message::AutoLockTick(
+            now + std::time::Duration::from_secs(30),
+        ));
+        // Lock is asynchronous; the clipboard flag is consumed when the lock is issued.
+        assert!(s.secret_on_clipboard);
+        let _ = s.update(Message::AutoLockTick(
+            now + std::time::Duration::from_secs(70),
+        ));
+        assert!(!s.secret_on_clipboard);
     }
 
     #[test]

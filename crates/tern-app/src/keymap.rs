@@ -483,6 +483,9 @@ pub fn main_subscription() -> Subscription<Message> {
             };
             Some(Message::Key(chord, raw))
         }
+        Event::Mouse(
+            iced::mouse::Event::ButtonPressed(_) | iced::mouse::Event::WheelScrolled { .. },
+        ) => Some(Message::Activity),
         _ => None,
     })
 }
