@@ -34,7 +34,7 @@ cargo fmt
 cargo clippy --all-targets -- -D warnings
 cargo test --workspace
 ```
-(`just fmt|lint|test|run` wrap these once S0-T02 lands.)
+(`just fmt|lint|test|run` wrap these. `just` is installed via `cargo install just`; toolchain pinned in `rust-toolchain.toml`; `unwrap_used` is denied outside tests.)
 
 ## Working rules
 

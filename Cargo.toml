@@ -21,3 +21,9 @@ tern-store = { path = "crates/tern-store" }
 tern-ssh = { path = "crates/tern-ssh" }
 tern-term = { path = "crates/tern-term" }
 tern-io = { path = "crates/tern-io" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
