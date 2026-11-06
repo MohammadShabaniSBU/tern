@@ -3261,6 +3261,7 @@ dependencies = [
  "anyhow",
  "directories",
  "iced",
+ "secrecy",
  "tempfile",
  "tern-core",
  "tern-io",
@@ -3268,9 +3269,11 @@ dependencies = [
  "tern-store",
  "tern-term",
  "tern-vault",
+ "tokio",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "zeroize",
 ]
 
 [[package]]
