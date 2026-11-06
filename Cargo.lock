@@ -3262,6 +3262,7 @@ dependencies = [
  "directories",
  "iced",
  "secrecy",
+ "serde_json",
  "tempfile",
  "tern-core",
  "tern-io",

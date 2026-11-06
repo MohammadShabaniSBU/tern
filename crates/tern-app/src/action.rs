@@ -21,6 +21,15 @@ impl ModeMask {
     pub const MODAL: Self = Self(8);
     /// Normal and Insert: the "global chord" actions that work whenever the app is interactive.
     pub const GLOBAL: Self = Self(1 | 2);
+    pub const ANY: Self = Self(15);
+
+    pub const fn or(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    pub const fn intersects(self, other: Self) -> bool {
+        self.0 & other.0 != 0
+    }
 
     pub const fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
@@ -125,11 +134,11 @@ const G: ModeMask = ModeMask::GLOBAL;
 
 actions! {
     // General
-    OpenPalette  => "palette.open",   "Open command palette",  General, ["ctrl+k", "ctrl+shift+p"], G;
+    OpenPalette  => "palette.open",   "Open command palette",  General, ["ctrl+k", "ctrl+shift+p"], ModeMask::GLOBAL.or(ModeMask::PALETTE);
     CheatSheet   => "help.cheatsheet","Show keybinding cheat sheet", General, ["f1", "?"], G;
     Settings     => "settings.open",  "Open settings",         General, ["ctrl+,"], G;
     ToggleTheme  => "theme.toggle",   "Toggle dark/light theme", General, [], G;
-    Back         => "ui.back",        "Back / close",          General, ["esc"], G;
+    Back         => "ui.back",        "Back / close",          General, ["esc"], ModeMask::ANY;
     // Navigation
     GoHosts      => "nav.hosts",      "Go to Hosts",           Navigation, ["1"], N;
     GoKeys       => "nav.keys",       "Go to Keys",            Navigation, ["2"], N;

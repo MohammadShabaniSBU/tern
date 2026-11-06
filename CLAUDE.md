@@ -7,7 +7,7 @@ Full plan lives in `docs/` — read `docs/README.md`, `docs/ARCHITECTURE.md`, `d
 
 ## Current status
 
-Sprint 0 done (CI, S0-T03, skipped by the user). Sprint 1 done. Working through **Sprint 2 only** (`docs/sprints/sprint-02-keyboard-ui-shell.md`); done: S2-T01. Do not write code for later sprints.
+Sprint 0 done (CI, S0-T03, skipped by the user). Sprint 1 done. Working through **Sprint 2 only** (`docs/sprints/sprint-02-keyboard-ui-shell.md`); done: S2-T01, S2-T03 (T02 next, then T05, T06, T07, T04, T08, T09). Do not write code for later sprints.
 - `tern-vault`: Argon2id KEK (128 MiB/8 passes, ~420 ms), XChaCha20-Poly1305 `seal/open`, `Vault` envelope (create/unlock/change_password/lock).
 - `tern-store`: migrations (`migrations/001_init.sql`), repos (secrets only via explicit `Vault` methods; AAD `"<table>:<column>:<row id>"`), `Store` = cloneable async handle over one worker thread that owns the Connection and the unlocked Vault.
 - `tern-app`: `app.rs` (Loading/Create/Unlock/Recovery/Main screens), `auth.rs` (forms, `Sensitive` password wrapper), `keymap.rs` (global key subscription; future keymap engine plugs in here), `logging.rs`, `paths.rs`.

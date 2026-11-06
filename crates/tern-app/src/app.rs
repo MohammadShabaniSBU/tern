@@ -1,12 +1,15 @@
 //! The iced application: state, messages, update and view.
 
+use std::time::Instant;
+
 use iced::widget::{column, container, row, space, text};
 use iced::{Element, Fill, Subscription, Task, Theme};
 use tern_store::Store;
 
+use crate::action::ModeMask;
 use crate::action::{Action, Section};
 use crate::auth::{self, AuthFailure, AuthForm, CONFIRM_ID, PASSWORD_ID, Sensitive, retry_delay};
-use crate::keymap;
+use crate::keymap::{self, Chord, Context, Keymap, Matcher, Outcome};
 
 /// Which part of the app owns the keyboard. See `docs/KEYBINDINGS.md`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -18,6 +21,14 @@ pub enum Mode {
 }
 
 impl Mode {
+    /// The single `ModeMask` bit for this mode.
+    pub fn mask(self) -> ModeMask {
+        match self {
+            Mode::Normal => ModeMask::NORMAL,
+            Mode::Palette => ModeMask::PALETTE,
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Mode::Normal => "NORMAL",
@@ -47,6 +58,8 @@ pub struct State {
     pub mode: Mode,
     pub section: Section,
     form: AuthForm,
+    keymap: Keymap,
+    matcher: Matcher,
     host_count: Option<usize>,
 }
 
@@ -67,7 +80,12 @@ pub enum Message {
     FocusNext,
     FocusPrevious,
     /// Run an action; the single entry point shared by keymap and palette.
+    #[allow(dead_code)] // constructed by the command palette (S2-T04)
     Dispatch(Action),
+    /// A key press on the main screen, routed through the keymap engine.
+    Key(Chord),
+    /// `(leader, keymap overrides)` JSON from the settings table.
+    KeymapLoaded(Result<(Option<String>, Option<String>), String>),
     Locked(Result<(), String>),
 }
 
@@ -85,6 +103,8 @@ impl State {
             mode: Mode::Normal,
             section: Section::default(),
             form: AuthForm::default(),
+            keymap: Keymap::defaults(),
+            matcher: Matcher::default(),
             host_count: None,
         };
         (state, check)
@@ -159,6 +179,29 @@ impl State {
             Message::FocusNext => iced::widget::operation::focus_next(),
             Message::FocusPrevious => iced::widget::operation::focus_previous(),
             Message::Dispatch(action) => self.dispatch(action),
+            Message::Key(chord) => {
+                if self.screen != Screen::Main {
+                    return Task::none();
+                }
+                let ctx = Context {
+                    mode: self.mode.mask(),
+                    terminal: false,
+                };
+                match self.matcher.feed(&self.keymap, ctx, chord, Instant::now()) {
+                    Outcome::Action(action) => self.dispatch(action),
+                    Outcome::Pending | Outcome::Unhandled => Task::none(),
+                }
+            }
+            Message::KeymapLoaded(result) => {
+                match result {
+                    Ok((leader, overrides)) => {
+                        self.keymap = Keymap::build(leader.as_deref(), overrides.as_deref());
+                        self.matcher.reset();
+                    }
+                    Err(e) => tracing::error!(error = %e, "could not load keymap settings"),
+                }
+                Task::none()
+            }
             Message::Locked(result) => {
                 if let Err(e) = result {
                     tracing::error!(error = %e, "lock failed");
@@ -268,11 +311,28 @@ impl State {
         self.form = AuthForm::default();
         self.screen = Screen::Main;
         self.mode = Mode::Normal;
-        let store = self.store.clone();
-        Task::perform(
-            async move { store.list_hosts().await.map(|h| h.len()) },
-            |r| Message::HostsLoaded(r.map_err(|e| e.to_string())),
-        )
+        let hosts = {
+            let store = self.store.clone();
+            Task::perform(
+                async move { store.list_hosts().await.map(|h| h.len()) },
+                |r| Message::HostsLoaded(r.map_err(|e| e.to_string())),
+            )
+        };
+        let keymap = {
+            let store = self.store.clone();
+            Task::perform(
+                async move {
+                    store
+                        .query(|db| {
+                            let s = db.settings();
+                            Ok((s.get("leader")?, s.get("keymap")?))
+                        })
+                        .await
+                },
+                |r| Message::KeymapLoaded(r.map_err(|e| e.to_string())),
+            )
+        };
+        Task::batch([hosts, keymap])
     }
 
     pub fn view(&self) -> Element<'_, Message> {
@@ -328,7 +388,10 @@ impl State {
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
-        let mut subs = vec![keymap::subscription()];
+        let mut subs = vec![match self.screen {
+            Screen::Main => keymap::main_subscription(),
+            _ => keymap::auth_subscription(),
+        }];
         if self.form.busy {
             subs.push(
                 iced::time::every(std::time::Duration::from_millis(120))
