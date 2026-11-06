@@ -17,6 +17,8 @@ pub enum PromptKind {
     RenameGroup(GroupId),
     /// Type a group name; empty removes the host from its group.
     MoveHost(HostId),
+    /// Comma-separated tags added to every listed host.
+    BulkTag(Vec<HostId>),
 }
 
 #[derive(Debug, Clone)]
@@ -32,6 +34,7 @@ pub enum PromptOutcome {
     CreateGroup(Group),
     RenameGroup(GroupId, String),
     MoveHost(HostId, Option<GroupId>),
+    AddTags(Vec<HostId>, Vec<String>),
 }
 
 impl Prompt {
@@ -48,6 +51,7 @@ impl Prompt {
             PromptKind::NewGroup { .. } => "New group name",
             PromptKind::RenameGroup(_) => "Rename group",
             PromptKind::MoveHost(_) => "Move to group (empty = none)",
+            PromptKind::BulkTag(_) => "Add tags (comma separated)",
         }
     }
 
@@ -87,6 +91,17 @@ impl Prompt {
                     return Err("a group with that name already exists here".into());
                 }
                 Ok(PromptOutcome::RenameGroup(*id, name.to_owned()))
+            }
+            PromptKind::BulkTag(hosts) => {
+                let tags: Vec<String> = name
+                    .split(',')
+                    .map(|t| t.trim().trim_start_matches('#').to_owned())
+                    .filter(|t| !t.is_empty())
+                    .collect();
+                if tags.is_empty() {
+                    return Err("enter at least one tag".into());
+                }
+                Ok(PromptOutcome::AddTags(hosts.clone(), tags))
             }
             PromptKind::MoveHost(host) => {
                 if name.is_empty() {
@@ -170,6 +185,20 @@ mod tests {
         assert!(rename("a2").is_ok());
         assert!(rename("b").is_err());
         assert!(rename("").is_err());
+    }
+
+    #[test]
+    fn bulk_tag_parses_and_requires_a_tag() {
+        let h = HostId::new();
+        let p = |s: &str| Prompt::new(PromptKind::BulkTag(vec![h]), s).resolve(&[]);
+        assert!(p(" , ").is_err());
+        assert_eq!(
+            p("#db, prod"),
+            Ok(PromptOutcome::AddTags(
+                vec![h],
+                vec!["db".into(), "prod".into()]
+            ))
+        );
     }
 
     #[test]

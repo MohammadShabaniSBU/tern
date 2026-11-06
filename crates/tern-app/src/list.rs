@@ -77,6 +77,8 @@ pub struct ListState {
     /// Index into `items` of the selected row. Always a visible item when any exist.
     selected: usize,
     pub filter: String,
+    /// Ids of multi-selected leaves (`Space`).
+    marked: std::collections::HashSet<String>,
     offset_y: f32,
     viewport_h: f32,
 }
@@ -88,6 +90,7 @@ impl ListState {
             visible: Vec::new(),
             selected: 0,
             filter: String::new(),
+            marked: std::collections::HashSet::new(),
             offset_y: 0.0,
             viewport_h: DEFAULT_VIEWPORT_H,
         };
@@ -210,10 +213,40 @@ impl ListState {
         }
         let selected = self.selected_item().map(key);
         self.items = items;
+        let present: std::collections::HashSet<&String> =
+            self.items.iter().filter_map(|i| i.id.as_ref()).collect();
+        self.marked.retain(|id| present.contains(id));
         self.selected = selected
             .and_then(|k| self.items.iter().position(|i| key(i) == k))
             .unwrap_or(0);
         self.refresh();
+    }
+
+    /// Toggle the multi-select mark on the selected leaf. `false` if it cannot be marked.
+    pub fn toggle_mark(&mut self) -> bool {
+        let Some(item) = self.selected_item() else {
+            return false;
+        };
+        let (true, Some(id)) = (item.group.is_none(), item.id.clone()) else {
+            return false;
+        };
+        if !self.marked.remove(&id) {
+            self.marked.insert(id);
+        }
+        true
+    }
+
+    /// Marked ids in display order.
+    pub fn marked_ids(&self) -> Vec<String> {
+        self.items
+            .iter()
+            .filter_map(|i| i.id.clone())
+            .filter(|id| self.marked.contains(id))
+            .collect()
+    }
+
+    pub fn clear_marks(&mut self) {
+        self.marked.clear();
     }
 
     pub fn set_filter(&mut self, filter: String) {
@@ -354,8 +387,13 @@ pub fn view(list: &ListState, focused: bool) -> Element<'_, Message> {
             Some(false) => "▸ ",
             None => "  ",
         };
+        let mark = if list.marked.contains(item.id.as_deref().unwrap_or("")) {
+            "● "
+        } else {
+            ""
+        };
         let label = format!(
-            "{}{marker}{}",
+            "{}{marker}{mark}{}",
             "    ".repeat(usize::from(item.depth)),
             item.label
         );
@@ -454,6 +492,30 @@ mod tests {
 
     fn sel(l: &ListState) -> &str {
         l.selected_item().map(|i| i.label.as_str()).unwrap_or("")
+    }
+
+    #[test]
+    fn marks_toggle_on_leaves_with_ids_only() {
+        let mut l = ListState::new(vec![
+            Item::group("g", 0, true).with_id("g1"),
+            Item::leaf("a", 1).with_id("a1"),
+            Item::leaf("b", 1),
+        ]);
+        assert!(!l.toggle_mark(), "groups cannot be marked");
+        l.move_by(1);
+        assert!(l.toggle_mark());
+        l.move_by(1);
+        assert!(!l.toggle_mark(), "dummy rows without ids cannot be marked");
+        assert_eq!(l.marked_ids(), ["a1"]);
+        l.move_by(-1);
+        assert!(l.toggle_mark());
+        assert!(l.marked_ids().is_empty());
+        l.toggle_mark();
+        l.replace_items(vec![Item::leaf("z", 0).with_id("z1")]);
+        assert!(
+            l.marked_ids().is_empty(),
+            "marks of vanished rows are dropped"
+        );
     }
 
     #[test]

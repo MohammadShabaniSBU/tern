@@ -161,6 +161,8 @@ actions! {
     ImportKey    => "key.import",     "Import SSH key from file", List, ["i"], N;
     PasteKey     => "key.paste",      "Import SSH key from clipboard", List, ["shift+p"], N;
     CopyPublicKey => "key.copy_public", "Copy public key",     List, ["shift+y"], N;
+    ToggleMark   => "list.mark",      "Mark/unmark for bulk actions", List, ["space"], N;
+    BulkTag      => "host.tag",       "Add tags to marked hosts", List, ["shift+t"], N;
     Duplicate    => "item.duplicate", "Duplicate selected",    List, ["y"], N;
     ToggleTunnels => "item.tunnels",  "Start/stop host tunnels", List, ["t"], N;
     // Forms

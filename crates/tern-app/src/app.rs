@@ -580,6 +580,58 @@ impl State {
                 }
             }
             Action::NewGroup | Action::MoveToGroup => Task::none(),
+            Action::ToggleMark if self.section == Section::Hosts => {
+                if self.list_mut().toggle_mark() {
+                    self.list_mut().move_by(1);
+                }
+                self.scroll_list(false)
+            }
+            Action::BulkTag if self.section == Section::Hosts => {
+                let mut ids = self.list().marked_ids();
+                if ids.is_empty() {
+                    ids.extend(
+                        self.list()
+                            .selected_item()
+                            .filter(|i| i.group.is_none())
+                            .and_then(|i| i.id.clone()),
+                    );
+                }
+                let hosts: Vec<tern_core::HostId> =
+                    ids.iter().filter_map(|id| id.parse().ok()).collect();
+                if hosts.is_empty() {
+                    self.toast(ToastKind::Info, "Select or mark hosts first");
+                    return Task::none();
+                }
+                self.open_prompt(Prompt::new(PromptKind::BulkTag(hosts), ""))
+            }
+            Action::Duplicate if self.section == Section::Hosts => {
+                let host = self
+                    .list()
+                    .selected_item()
+                    .filter(|i| i.group.is_none())
+                    .and_then(|i| i.id.as_deref())
+                    .and_then(|id| self.host_data.host(id))
+                    .cloned();
+                let Some(mut copy) = host else {
+                    self.toast(ToastKind::Info, "Select a host to duplicate");
+                    return Task::none();
+                };
+                copy.id = tern_core::HostId::new();
+                copy.label = format!("{} (copy)", copy.label);
+                let store = self.store.clone();
+                Task::perform(
+                    async move {
+                        let label = copy.label.clone();
+                        store
+                            .insert_host(copy)
+                            .await
+                            .map(|()| format!("Created '{label}'"))
+                            .map_err(|e| e.to_string())
+                    },
+                    Message::GroupsChanged,
+                )
+            }
+            Action::ToggleMark | Action::BulkTag | Action::Duplicate => Task::none(),
             Action::Add if self.section == Section::Keys => {
                 self.open_key_form(KeyForm::new(KeyMode::Generate))
             }
@@ -930,6 +982,9 @@ impl State {
         self.prompt = None;
         self.mode = Mode::Normal;
         self.matcher.reset();
+        if matches!(outcome, PromptOutcome::AddTags(..)) {
+            self.lists[0].clear_marks();
+        }
         let store = self.store.clone();
         Task::perform(
             async move {
@@ -940,6 +995,7 @@ impl State {
                             .insert_group(g)
                             .await
                             .map(|()| format!("Created group '{name}'"))
+                            .map_err(|e| e.to_string())
                     }
                     PromptOutcome::RenameGroup(id, name) => {
                         let groups = store.list_groups().await.map_err(|e| e.to_string())?;
@@ -951,13 +1007,28 @@ impl State {
                             .update_group(g)
                             .await
                             .map(|()| format!("Renamed to '{name}'"))
+                            .map_err(|e| e.to_string())
+                    }
+                    PromptOutcome::AddTags(ids, tags) => {
+                        let hosts = store.list_hosts().await.map_err(|e| e.to_string())?;
+                        let mut n = 0;
+                        for mut h in hosts.into_iter().filter(|h| ids.contains(&h.id)) {
+                            for t in &tags {
+                                if !h.tags.iter().any(|x| x.eq_ignore_ascii_case(t)) {
+                                    h.tags.push(t.clone());
+                                }
+                            }
+                            store.update_host(h).await.map_err(|e| e.to_string())?;
+                            n += 1;
+                        }
+                        Ok(format!("Tagged {n} host(s)"))
                     }
                     PromptOutcome::MoveHost(host, group) => store
                         .set_host_group(host, group)
                         .await
-                        .map(|()| "Moved host".to_owned()),
+                        .map(|()| "Moved host".to_owned())
+                        .map_err(|e| e.to_string()),
                 }
-                .map_err(|e| e.to_string())
             },
             Message::GroupsChanged,
         )
