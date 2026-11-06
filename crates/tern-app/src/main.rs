@@ -24,6 +24,8 @@ fn main() -> anyhow::Result<()> {
         State::view,
     )
     .title("tern")
+    .font(app::FONT_BYTES)
+    .default_font(app::MONO)
     .subscription(State::subscription)
     .theme(State::theme)
     .window_size((1100.0, 700.0))

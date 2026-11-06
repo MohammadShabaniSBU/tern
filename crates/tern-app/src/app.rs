@@ -2,8 +2,8 @@
 
 use std::time::Instant;
 
-use iced::widget::{column, container, row, space, text, text_input};
-use iced::{Element, Fill, Subscription, Task, Theme};
+use iced::widget::{column, container, mouse_area, row, space, text, text_input};
+use iced::{Border, Element, Fill, Font, Subscription, Task, Theme};
 use tern_store::Store;
 
 use crate::action::ModeMask;
@@ -94,6 +94,7 @@ pub struct State {
     pub screen: Screen,
     pub mode: Mode,
     pub section: Section,
+    dark: bool,
     pub pane: Pane,
     lists: [ListState; 4],
     modals: ModalStack,
@@ -112,6 +113,7 @@ pub struct LoadedSettings {
     leader: Option<String>,
     keymap: Option<String>,
     recent: Option<String>,
+    theme: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -131,14 +133,13 @@ pub enum Message {
     FocusNext,
     FocusPrevious,
     /// Run an action; the single entry point shared by keymap and palette.
-    #[allow(dead_code)] // constructed by mouse-clickable UI in S2-T08
     Dispatch(Action),
     /// A key press on the main screen, routed through the keymap engine.
     Key(Chord),
     /// `(leader, keymap overrides)` JSON from the settings table.
     SettingsLoaded(Result<LoadedSettings, String>),
     PaletteQueryChanged(String),
-    RecentSaved(Result<(), String>),
+    SettingSaved(Result<(), String>),
     Locked(Result<(), String>),
     ToastTick(Instant),
     FilterChanged(String),
@@ -161,6 +162,7 @@ impl State {
             screen: Screen::Loading,
             mode: Mode::Normal,
             section: Section::default(),
+            dark: true,
             pane: Pane::default(),
             modals: ModalStack::default(),
             toasts: Toasts::default(),
@@ -260,7 +262,7 @@ impl State {
                     Outcome::Pending | Outcome::Unhandled => Task::none(),
                 }
             }
-            Message::RecentSaved(result) => {
+            Message::SettingSaved(result) => {
                 if let Err(e) = result {
                     tracing::warn!(error = %e, "could not save palette recents");
                 }
@@ -278,6 +280,8 @@ impl State {
                             .and_then(|json| serde_json::from_str(&json).ok())
                             .unwrap_or_default();
                         self.palette.set_recent(recent);
+                        // Stored as JSON text; anything but "light" keeps the dark default.
+                        self.dark = loaded.theme.as_deref().map(str::trim) != Some("\"light\"");
                         self.keymap =
                             Keymap::build(loaded.leader.as_deref(), loaded.keymap.as_deref());
                         self.matcher.reset();
@@ -333,6 +337,19 @@ impl State {
         }
         match action {
             Action::Back => self.back(),
+            Action::ToggleTheme => {
+                self.dark = !self.dark;
+                let json = if self.dark { "\"dark\"" } else { "\"light\"" };
+                let store = self.store.clone();
+                Task::perform(
+                    async move {
+                        store
+                            .query(move |db| db.settings().set("theme", json))
+                            .await
+                    },
+                    |r| Message::SettingSaved(r.map_err(|e| e.to_string())),
+                )
+            }
             Action::Delete => {
                 if let Some(item) = self.list().selected_item() {
                     let body = if item.group.is_some() {
@@ -484,7 +501,7 @@ impl State {
                         .query(move |db| db.settings().set(palette::RECENT_SETTING, &json))
                         .await
                 },
-                |r| Message::RecentSaved(r.map_err(|e| e.to_string())),
+                |r| Message::SettingSaved(r.map_err(|e| e.to_string())),
             )
         };
         let run = match entry.target {
@@ -659,6 +676,7 @@ impl State {
                                 leader: s.get("leader")?,
                                 keymap: s.get("keymap")?,
                                 recent: s.get(palette::RECENT_SETTING)?,
+                                theme: s.get("theme")?,
                             })
                         })
                         .await
@@ -685,34 +703,62 @@ impl State {
     }
 
     fn main_view(&self) -> Element<'_, Message> {
-        let mut nav = column![text("tern").size(20), space().height(12)].spacing(6);
-        for section in Section::ALL {
-            let label = if section == self.section {
-                format!("> {}", section.label())
-            } else {
-                format!("  {}", section.label())
+        let mut nav = column![text("tern").size(20), space().height(12)].spacing(4);
+        for (n, section) in Section::ALL.into_iter().enumerate() {
+            let active = section == self.section;
+            let label = format!(
+                "{} {}  {}",
+                if active { ">" } else { " " },
+                n + 1,
+                section.label()
+            );
+            let goto = match section {
+                Section::Hosts => Action::GoHosts,
+                Section::Keys => Action::GoKeys,
+                Section::Identities => Action::GoIdentities,
+                Section::Tunnels => Action::GoTunnels,
             };
-            nav = nav.push(text(label));
+            nav = nav.push(
+                mouse_area(
+                    container(text(label).size(14))
+                        .width(Fill)
+                        .padding([2, 6])
+                        .style(move |theme: &Theme| selected_row_style(theme, active)),
+                )
+                .on_press(Message::Dispatch(goto)),
+            );
         }
         let sidebar = container(nav)
             .padding(12)
             .width(200)
             .height(Fill)
-            .style(container::bordered_box);
+            .style(pane_frame(self.pane == Pane::Sidebar));
 
-        let main_text = format!("Vault unlocked — {} host(s) stored", self.hosts.len());
         let filter = text_input("Filter (/)", &self.list().filter)
             .id(FILTER_ID)
             .on_input(Message::FilterChanged)
             .on_submit(Message::FilterSubmitted);
-        let list = list::view(
-            self.list(),
-            self.pane == Pane::List && self.mode == Mode::Normal,
-        );
-        let main_area = container(column![filter, text(main_text).size(14), list].spacing(12))
+        let list = list::view(self.list(), self.pane == Pane::List);
+        let list_pane =
+            container(column![text(self.section.label()).size(16), filter, list,].spacing(10))
+                .padding(12)
+                .width(Fill)
+                .height(Fill)
+                .style(pane_frame(self.pane == Pane::List));
+
+        let detail_text = match self.list().selected_item() {
+            Some(item) => format!(
+                "{}\n\n(details arrive with the {} screen, Sprint 3)",
+                item.label,
+                self.section.label().to_lowercase()
+            ),
+            None => "Nothing selected".to_owned(),
+        };
+        let detail = container(text(detail_text).size(14))
             .padding(12)
-            .width(Fill)
-            .height(Fill);
+            .width(320)
+            .height(Fill)
+            .style(pane_frame(self.pane == Pane::Detail));
 
         let mut status = row![
             text(format!(
@@ -736,7 +782,7 @@ impl State {
             .width(Fill)
             .style(container::bordered_box);
 
-        let base = column![row![sidebar, main_area].height(Fill), status_bar];
+        let base = column![row![sidebar, list_pane, detail].height(Fill), status_bar];
         match (self.modals.top(), self.mode) {
             (Some(m), _) => iced::widget::stack![base, modal::view(m)].into(),
             (None, Mode::Palette) => {
@@ -766,9 +812,45 @@ impl State {
     }
 
     pub fn theme(&self) -> Theme {
-        Theme::Dark
+        if self.dark { Theme::Dark } else { Theme::Light }
     }
 }
+
+/// Container style for a pane: a visible focus ring while it has keyboard focus.
+fn pane_frame(focused: bool) -> impl Fn(&Theme) -> container::Style {
+    move |theme: &Theme| {
+        let palette = theme.extended_palette();
+        container::Style {
+            border: Border {
+                color: if focused {
+                    palette.primary.strong.color
+                } else {
+                    palette.background.strong.color
+                },
+                width: if focused { 2.0 } else { 1.0 },
+                radius: 4.0.into(),
+            },
+            ..container::Style::default()
+        }
+    }
+}
+
+fn selected_row_style(theme: &Theme, selected: bool) -> container::Style {
+    if !selected {
+        return container::Style::default();
+    }
+    let palette = theme.extended_palette();
+    container::Style {
+        background: Some(palette.primary.weak.color.into()),
+        text_color: Some(palette.primary.weak.text),
+        border: Border::default().rounded(4),
+        ..container::Style::default()
+    }
+}
+
+/// Bundled monospace font (JetBrains Mono, SIL OFL 1.1; licence in `assets/fonts/OFL.txt`).
+pub const FONT_BYTES: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf");
+pub const MONO: Font = Font::with_name("JetBrains Mono");
 
 #[cfg(test)]
 mod tests {
@@ -948,6 +1030,16 @@ mod tests {
         let _ = s.update(Message::Dispatch(Action::PaletteRun));
         assert_eq!(s.mode, Mode::Normal);
         assert!(s.toasts.current().is_some());
+    }
+
+    #[test]
+    fn theme_toggles_between_dark_and_light() {
+        let mut s = main_state();
+        assert_eq!(s.theme(), Theme::Dark);
+        let _ = s.update(Message::Dispatch(Action::ToggleTheme));
+        assert_eq!(s.theme(), Theme::Light);
+        let _ = s.update(Message::Dispatch(Action::ToggleTheme));
+        assert_eq!(s.theme(), Theme::Dark);
     }
 
     #[test]
