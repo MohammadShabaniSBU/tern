@@ -1,4 +1,6 @@
-//! tern-ssh: stub (filled in by a later sprint).
+//! tern-ssh: SSH client wrapper and key helpers.
+
+pub mod keys;
 
 /// Errors produced by `tern-ssh`. Variants are added as functionality lands.
 #[derive(Debug, thiserror::Error)]
