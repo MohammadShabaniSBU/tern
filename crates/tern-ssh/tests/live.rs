@@ -504,3 +504,46 @@ async fn manager_starts_reports_and_stops_a_tunnel() {
         }
     }
 }
+
+/// Jump host: `TERN_SSH_TEST_*` is the bastion (needs `AllowTcpForwarding yes`);
+/// `TERN_SSH_JUMP_TARGET=host:port` is the private target as seen *from the bastion*
+/// (same user/password), e.g. a second container on a private docker network.
+#[tokio::test]
+async fn terminal_through_a_jump_host_verifies_every_hop() {
+    let (Some(e), Ok(target)) = (env(), std::env::var("TERN_SSH_JUMP_TARGET")) else {
+        return;
+    };
+    let (thost, tport) = target.rsplit_once(':').unwrap();
+    let mut p = params(&e, &e.password);
+    p.host = thost.into();
+    p.port = tport.parse().unwrap();
+    p.jump = Some(Box::new(params(&e, &e.password)));
+    let known = Arc::new(MemKnown::default());
+    let (h, mut rx) = spawn(p, known.clone());
+    let mut out = String::new();
+    let mut prompts = Vec::new();
+    loop {
+        match next(&mut rx).await {
+            SessionEvent::HostKeyPrompt { host, port, .. } => {
+                prompts.push((host, port));
+                h.send(SessionCommand::HostKeyDecision(true)).await;
+            }
+            SessionEvent::Connected => {
+                h.send(SessionCommand::Write("echo hop-$((40+2))\nexit\n".into()))
+                    .await;
+            }
+            SessionEvent::Output(b) => out.push_str(&String::from_utf8_lossy(&b)),
+            SessionEvent::Exited(_) | SessionEvent::Closed => break,
+            SessionEvent::Error(err) => panic!("{err}"),
+            _ => {}
+        }
+    }
+    assert!(out.contains("hop-42"), "output was: {out:?}");
+    assert_eq!(
+        prompts.len(),
+        2,
+        "bastion and target are both verified: {prompts:?}"
+    );
+    assert_eq!(prompts[0].0, e.host);
+    assert_eq!(prompts[1].0, thost);
+}

@@ -245,6 +245,24 @@ pub async fn resolve(store: &Store, target: &ConnTarget) -> Result<ConnectParams
         }
     };
     let id: HostId = host_id.parse().map_err(|_| "Unknown host".to_owned())?;
+    let mut seen = Vec::new();
+    resolve_host(store, id, &mut seen).await
+}
+
+/// Resolve a saved host and, recursively, its jump hosts. `seen` holds the ids already on the
+/// chain: meeting one again is a cycle.
+async fn resolve_host(
+    store: &Store,
+    id: HostId,
+    seen: &mut Vec<HostId>,
+) -> Result<ConnectParams, String> {
+    if seen.contains(&id) {
+        return Err("Jump host cycle: a host is its own jump host".to_owned());
+    }
+    if seen.len() > tern_ssh::MAX_JUMPS {
+        return Err("Too many jump hosts in the chain".to_owned());
+    }
+    seen.push(id);
     let host = store
         .get_host(id)
         .await
@@ -287,6 +305,18 @@ pub async fn resolve(store: &Store, target: &ConnTarget) -> Result<ConnectParams
                 .map_err(|e| e.to_string())?;
             params.key = Some(KeyAuth { pem, passphrase });
         }
+    }
+    if let Some(jid) = host.jump_host_id {
+        let jump = Box::pin(resolve_host(store, jid, seen))
+            .await
+            .map_err(|e| {
+                if e.starts_with("Jump host") || e.starts_with("Too many") {
+                    e
+                } else {
+                    format!("Jump host: {e}")
+                }
+            })?;
+        params.jump = Some(Box::new(jump));
     }
     Ok(params)
 }
@@ -521,6 +551,7 @@ pub fn view<'a>(s: &'a SessionView, ctx: &ViewCtx<'a>) -> Element<'a, Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tern_core::Host;
 
     #[test]
     fn auth_answers_are_collected_per_prompt() {
@@ -545,5 +576,53 @@ mod tests {
         s.input = Sensitive::new("two".into());
         assert_eq!(s.answer().map(|a| a.len()), Some(2));
         assert_eq!(s.phase, Phase::Connecting);
+    }
+
+    async fn store_with_hosts() -> (Store, Host, Host, Host) {
+        let store = Store::open_in_memory().unwrap();
+        let kdf = tern_vault::KdfParams::new(8, 1, 1).unwrap();
+        store
+            .create_vault_with_params(secrecy::SecretString::from("pw"), kdf)
+            .await
+            .unwrap();
+        let mk = |l: &str| {
+            let mut h = Host::new(l, format!("{l}.example"));
+            h.username = Some("u".into());
+            h
+        };
+        let (a, b, c) = (mk("a"), mk("b"), mk("c"));
+        for h in [&a, &b, &c] {
+            store.insert_host(h.clone()).await.unwrap();
+        }
+        (store, a, b, c)
+    }
+
+    #[tokio::test]
+    async fn resolve_follows_the_jump_chain() {
+        let (store, mut a, mut b, c) = store_with_hosts().await;
+        a.jump_host_id = Some(b.id);
+        b.jump_host_id = Some(c.id);
+        store.update_host(a.clone()).await.unwrap();
+        store.update_host(b).await.unwrap();
+        let p = resolve(&store, &ConnTarget::Saved(a.id.to_string()))
+            .await
+            .unwrap();
+        assert_eq!(p.host, "a.example");
+        let j1 = p.jump.as_deref().unwrap();
+        assert_eq!(j1.host, "b.example");
+        assert_eq!(j1.jump.as_deref().unwrap().host, "c.example");
+    }
+
+    #[tokio::test]
+    async fn resolve_rejects_jump_cycles() {
+        let (store, mut a, mut b, _c) = store_with_hosts().await;
+        a.jump_host_id = Some(b.id);
+        b.jump_host_id = Some(a.id);
+        store.update_host(a.clone()).await.unwrap();
+        store.update_host(b).await.unwrap();
+        let err = resolve(&store, &ConnTarget::Saved(a.id.to_string()))
+            .await
+            .unwrap_err();
+        assert!(err.contains("cycle"), "{err}");
     }
 }

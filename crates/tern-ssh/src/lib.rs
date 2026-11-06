@@ -11,8 +11,8 @@ pub mod tunnel;
 pub use known_hosts::{HostKeyInfo, HostKeyVerdict, KnownHostsStore};
 pub use pool::ConnectionPool;
 pub use session::{
-    AuthPromptItem, Conn, ConnectParams, KeyAuth, SessionCommand, SessionEvent, SessionHandle,
-    SharedConn, spawn, spawn_pooled,
+    AuthPromptItem, Conn, ConnectParams, KeyAuth, MAX_JUMPS, SessionCommand, SessionEvent,
+    SessionHandle, SharedConn, spawn, spawn_pooled,
 };
 
 /// Errors produced by `tern-ssh`.

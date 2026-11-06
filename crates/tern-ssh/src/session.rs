@@ -37,6 +37,9 @@ pub struct ConnectParams {
     pub rows: u32,
     pub keepalive: Option<Duration>,
     pub connect_timeout: Duration,
+    /// Bastion to tunnel through (ProxyJump). Its own `jump` makes a chain; the outermost hop is
+    /// connected first. Every hop has its host key verified and is authenticated on its own.
+    pub jump: Option<Box<ConnectParams>>,
 }
 
 impl ConnectParams {
@@ -52,6 +55,7 @@ impl ConnectParams {
             rows: 24,
             keepalive: Some(Duration::from_secs(30)),
             connect_timeout: Duration::from_secs(15),
+            jump: None,
         }
     }
 }
@@ -286,15 +290,22 @@ struct Actor {
 /// tunnels). The connection is closed when the last [`SharedConn`] is dropped.
 pub struct Conn {
     handle: Option<client::Handle<Handler>>,
+    /// Jump-host connections carrying this one; kept alive for as long as it is used.
+    _hops: Vec<client::Handle<Handler>>,
     pub(crate) forwards: RemoteForwards,
 }
 
 pub type SharedConn = Arc<Conn>;
 
 impl Conn {
-    fn new(handle: client::Handle<Handler>, forwards: RemoteForwards) -> SharedConn {
+    fn new(
+        handle: client::Handle<Handler>,
+        hops: Vec<client::Handle<Handler>>,
+        forwards: RemoteForwards,
+    ) -> SharedConn {
         Arc::new(Self {
             handle: Some(handle),
+            _hops: hops,
             forwards,
         })
     }
@@ -323,6 +334,24 @@ impl Drop for Conn {
     }
 }
 
+/// Maximum number of jump hosts in a chain.
+pub const MAX_JUMPS: usize = 8;
+
+/// The hops to connect, outermost jump host first and the target last.
+fn hop_path(params: &ConnectParams) -> Result<Vec<&ConnectParams>, Error> {
+    let mut path = vec![params];
+    let mut cur = params;
+    while let Some(j) = cur.jump.as_deref() {
+        if path.len() > MAX_JUMPS {
+            return Err(Error::Other("too many jump hosts".into()));
+        }
+        path.push(j);
+        cur = j;
+    }
+    path.reverse();
+    Ok(path)
+}
+
 const NEEDS_TERMINAL: &str = "needs interactive input; connect once from a terminal first";
 
 /// Connect and authenticate without a UI. Unknown/changed host keys and interactive prompts
@@ -339,9 +368,8 @@ pub(crate) async fn connect_headless(
         headless: true,
     };
     let forwards = RemoteForwards::default();
-    let mut handle = actor.connect(params, known, forwards.clone()).await?;
-    actor.authenticate(&mut handle, params).await?;
-    Ok(Conn::new(handle, forwards))
+    let (handle, hops) = actor.connect_chain(params, known, forwards.clone()).await?;
+    Ok(Conn::new(handle, hops, forwards))
 }
 
 /// Flush interval / size for coalescing remote output into few UI events.
@@ -366,9 +394,8 @@ impl Actor {
             Some(c) => c,
             None => {
                 let forwards = RemoteForwards::default();
-                let mut handle = self.connect(&params, known, forwards.clone()).await?;
-                self.authenticate(&mut handle, &params).await?;
-                let conn = Conn::new(handle, forwards);
+                let (handle, hops) = self.connect_chain(&params, known, forwards.clone()).await?;
+                let conn = Conn::new(handle, hops, forwards);
                 if let Some((p, key)) = &pool {
                     p.insert(key, &conn);
                 }
@@ -390,12 +417,60 @@ impl Actor {
         self.shell_loop(channel).await
     }
 
-    /// Connect and verify the host key, relaying the host-key prompt to the UI.
+    /// Connect + authenticate the target, going through every jump host first. Returns the
+    /// target handle and the (authenticated) hop handles, outermost first.
+    async fn connect_chain(
+        &mut self,
+        params: &ConnectParams,
+        known: Arc<dyn KnownHostsStore>,
+        forwards: RemoteForwards,
+    ) -> Result<(client::Handle<Handler>, Vec<client::Handle<Handler>>), Error> {
+        let path = hop_path(params)?;
+        let mut hops: Vec<client::Handle<Handler>> = Vec::new();
+        for (i, hop) in path.iter().enumerate() {
+            let last = i + 1 == path.len();
+            let via = match hops.last() {
+                None => None,
+                Some(prev) => Some(
+                    prev.channel_open_direct_tcpip(
+                        hop.host.clone(),
+                        u32::from(hop.port),
+                        "127.0.0.1",
+                        0,
+                    )
+                    .await
+                    .map_err(|e| {
+                        Error::Other(format!(
+                            "jump host could not reach {}:{}: {e}",
+                            hop.host, hop.port
+                        ))
+                    })?
+                    .into_stream(),
+                ),
+            };
+            let fwd = if last {
+                forwards.clone()
+            } else {
+                RemoteForwards::default()
+            };
+            let mut handle = self.connect(hop, known.clone(), fwd, via).await?;
+            self.authenticate(&mut handle, hop).await?;
+            if last {
+                return Ok((handle, hops));
+            }
+            hops.push(handle);
+        }
+        Err(Error::Other("empty connection path".into()))
+    }
+
+    /// Connect and verify the host key, relaying the host-key prompt to the UI. `via` is an
+    /// already-open channel to the hop's address (jump host), otherwise a direct TCP connection.
     async fn connect(
         &mut self,
         params: &ConnectParams,
         known: Arc<dyn KnownHostsStore>,
         forwards: RemoteForwards,
+        via: Option<russh::ChannelStream<client::Msg>>,
     ) -> Result<client::Handle<Handler>, Error> {
         let config = Arc::new(client::Config {
             keepalive_interval: params.keepalive,
@@ -410,8 +485,19 @@ impl Actor {
             prompts: prompt_tx,
             forwards,
         };
-        let fut = client::connect(config, (params.host.as_str(), params.port), handler);
-        tokio::pin!(fut);
+        let mut fut: std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<client::Handle<Handler>, HandlerError>>
+                    + Send,
+            >,
+        > = match via {
+            Some(stream) => Box::pin(client::connect_stream(config, stream, handler)),
+            None => Box::pin(client::connect(
+                config,
+                (params.host.clone(), params.port),
+                handler,
+            )),
+        };
         let deadline = tokio::time::sleep(params.connect_timeout);
         tokio::pin!(deadline);
         let mut pending: Option<oneshot::Sender<bool>> = None;
@@ -681,5 +767,36 @@ impl Actor {
             return true;
         }
         self.emit(SessionEvent::Output(buf.split().freeze())).await
+    }
+}
+
+#[cfg(test)]
+mod jump_tests {
+    use super::*;
+
+    #[test]
+    fn hop_path_is_outermost_first() {
+        let mut a = ConnectParams::new("a", 22, "u");
+        let mut b = ConnectParams::new("b", 22, "u");
+        let c = ConnectParams::new("c", 22, "u");
+        b.jump = Some(Box::new(c));
+        a.jump = Some(Box::new(b));
+        let hosts: Vec<_> = hop_path(&a)
+            .unwrap()
+            .iter()
+            .map(|p| p.host.clone())
+            .collect();
+        assert_eq!(hosts, ["c", "b", "a"]);
+    }
+
+    #[test]
+    fn hop_path_rejects_runaway_chains() {
+        let mut p = ConnectParams::new("h0", 22, "u");
+        for i in 1..=MAX_JUMPS + 2 {
+            let mut n = ConnectParams::new(format!("h{i}"), 22, "u");
+            n.jump = Some(Box::new(p));
+            p = n;
+        }
+        assert!(hop_path(&p).is_err());
     }
 }
