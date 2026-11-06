@@ -2,11 +2,14 @@
 
 pub mod keys;
 pub mod known_hosts;
+pub mod pool;
 pub mod session;
 
 pub use known_hosts::{HostKeyInfo, HostKeyVerdict, KnownHostsStore};
+pub use pool::ConnectionPool;
 pub use session::{
-    AuthPromptItem, ConnectParams, KeyAuth, SessionCommand, SessionEvent, SessionHandle, spawn,
+    AuthPromptItem, Conn, ConnectParams, KeyAuth, SessionCommand, SessionEvent, SessionHandle,
+    SharedConn, spawn, spawn_pooled,
 };
 
 /// Errors produced by `tern-ssh`.

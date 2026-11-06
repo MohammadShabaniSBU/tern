@@ -12,7 +12,8 @@ use std::time::Duration;
 use secrecy::SecretString;
 use tern_ssh::known_hosts::BoxFuture;
 use tern_ssh::{
-    ConnectParams, Error, HostKeyInfo, KnownHostsStore, SessionCommand, SessionEvent, spawn,
+    ConnectParams, ConnectionPool, Error, HostKeyInfo, KnownHostsStore, SessionCommand,
+    SessionEvent, spawn, spawn_pooled,
 };
 use tokio::sync::mpsc::Receiver;
 
@@ -248,4 +249,43 @@ async fn server_death_ends_the_session_cleanly() {
             None => panic!("stream ended without a final event"),
         }
     }
+}
+
+#[tokio::test]
+async fn terminal_and_headless_user_share_one_connection() {
+    let Some(e) = env() else { return };
+    let known = Arc::new(MemKnown::default());
+    let pool = ConnectionPool::new();
+    let (h, mut rx) = spawn_pooled(
+        params(&e, &e.password),
+        known.clone(),
+        Some((pool.clone(), "host-1".into())),
+    );
+    loop {
+        match next(&mut rx).await {
+            SessionEvent::HostKeyPrompt { .. } => {
+                h.send(SessionCommand::HostKeyDecision(true)).await;
+            }
+            SessionEvent::Connected => break,
+            SessionEvent::Error(err) => panic!("{err}"),
+            _ => {}
+        }
+    }
+    assert_eq!(pool.live(), 1);
+    let shared = pool
+        .get_or_connect("host-1", &params(&e, "wrong-on-purpose"), known)
+        .await
+        .expect("must reuse the terminal's connection, not authenticate again");
+    assert_eq!(pool.live(), 1);
+
+    // Closing the terminal keeps the connection alive for the other user.
+    h.send(SessionCommand::Close).await;
+    while !matches!(
+        next(&mut rx).await,
+        SessionEvent::Closed | SessionEvent::Error(_)
+    ) {}
+    assert!(pool.get("host-1").is_some());
+    drop(shared);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(pool.get("host-1").is_none(), "unused connection must close");
 }

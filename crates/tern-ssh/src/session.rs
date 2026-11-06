@@ -15,6 +15,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::Error;
 use crate::known_hosts::{HostKeyInfo, HostKeyVerdict, KnownHostsStore, verdict};
+use crate::pool::ConnectionPool;
 
 /// A private key to authenticate with (OpenSSH PEM, possibly encrypted).
 #[derive(Clone)]
@@ -130,7 +131,7 @@ struct HostKeyRequest {
 }
 
 #[derive(Debug)]
-enum HandlerError {
+pub(crate) enum HandlerError {
     Russh(russh::Error),
     Rejected,
     Store(String),
@@ -152,7 +153,7 @@ impl From<HandlerError> for Error {
     }
 }
 
-struct Handler {
+pub(crate) struct Handler {
     host: String,
     port: u16,
     known: Arc<dyn KnownHostsStore>,
@@ -219,6 +220,17 @@ pub fn spawn(
     params: ConnectParams,
     known: Arc<dyn KnownHostsStore>,
 ) -> (SessionHandle, mpsc::Receiver<SessionEvent>) {
+    spawn_pooled(params, known, None)
+}
+
+/// Like [`spawn`], but shares an authenticated connection through `pool` (keyed by the given
+/// string): an existing live connection is reused without authenticating again, and a freshly
+/// authenticated one is registered for later users (e.g. tunnels).
+pub fn spawn_pooled(
+    params: ConnectParams,
+    known: Arc<dyn KnownHostsStore>,
+    pool: Option<(ConnectionPool, String)>,
+) -> (SessionHandle, mpsc::Receiver<SessionEvent>) {
     let (cmd_tx, cmd_rx) = mpsc::channel(256);
     // Bounded: a slow UI backpressures the remote instead of buffering unboundedly.
     let (ev_tx, ev_rx) = mpsc::channel(64);
@@ -226,8 +238,9 @@ pub fn spawn(
         let mut actor = Actor {
             events: ev_tx,
             commands: cmd_rx,
+            headless: false,
         };
-        let end = actor.run(params, known).await;
+        let end = actor.run(params, known, pool).await;
         match end {
             Ok(()) => actor.emit(SessionEvent::Closed).await,
             Err(e) => actor.emit(SessionEvent::Error(e)).await,
@@ -239,6 +252,67 @@ pub fn spawn(
 struct Actor {
     events: mpsc::Sender<SessionEvent>,
     commands: mpsc::Receiver<SessionCommand>,
+    /// No UI attached (tunnels): prompts fail with an explanatory error instead of waiting.
+    headless: bool,
+}
+
+/// An authenticated SSH connection that can be shared by several users (terminal sessions and
+/// tunnels). The connection is closed when the last [`SharedConn`] is dropped.
+pub struct Conn {
+    handle: Option<client::Handle<Handler>>,
+}
+
+pub type SharedConn = Arc<Conn>;
+
+impl Conn {
+    fn new(handle: client::Handle<Handler>) -> SharedConn {
+        Arc::new(Self {
+            handle: Some(handle),
+        })
+    }
+
+    pub(crate) fn handle(&self) -> Result<&client::Handle<Handler>, Error> {
+        // `handle` is only taken in `drop`.
+        self.handle.as_ref().ok_or(Error::Disconnected)
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.handle.as_ref().is_none_or(|h| h.is_closed())
+    }
+}
+
+impl Drop for Conn {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take()
+            && let Ok(rt) = tokio::runtime::Handle::try_current()
+        {
+            rt.spawn(async move {
+                let _ = handle
+                    .disconnect(russh::Disconnect::ByApplication, "", "en")
+                    .await;
+            });
+        }
+    }
+}
+
+const NEEDS_TERMINAL: &str = "needs interactive input; connect once from a terminal first";
+
+/// Connect and authenticate without a UI. Unknown/changed host keys and interactive prompts
+/// fail instead of waiting for an answer.
+pub(crate) async fn connect_headless(
+    params: &ConnectParams,
+    known: Arc<dyn KnownHostsStore>,
+) -> Result<SharedConn, Error> {
+    let (_cmd_tx, cmd_rx) = mpsc::channel(1);
+    let (ev_tx, _ev_rx) = mpsc::channel(1);
+    let mut actor = Actor {
+        events: ev_tx,
+        commands: cmd_rx,
+        headless: true,
+    };
+    let mut handle = actor.connect(params, known).await?;
+    actor.authenticate(&mut handle, params).await?;
+    Ok(Conn::new(handle))
 }
 
 /// Flush interval / size for coalescing remote output into few UI events.
@@ -255,22 +329,35 @@ impl Actor {
         &mut self,
         params: ConnectParams,
         known: Arc<dyn KnownHostsStore>,
+        pool: Option<(ConnectionPool, String)>,
     ) -> Result<(), Error> {
         self.emit(SessionEvent::Connecting).await;
-        let mut handle = self.connect(&params, known).await?;
-        self.authenticate(&mut handle, &params).await?;
+        let reused = pool.as_ref().and_then(|(p, key)| p.get(key));
+        let conn = match reused {
+            Some(c) => c,
+            None => {
+                let mut handle = self.connect(&params, known).await?;
+                self.authenticate(&mut handle, &params).await?;
+                let conn = Conn::new(handle);
+                if let Some((p, key)) = &pool {
+                    p.insert(key, &conn);
+                }
+                conn
+            }
+        };
 
-        let channel = handle.channel_open_session().await.map_err(Error::from)?;
+        let channel = conn
+            .handle()?
+            .channel_open_session()
+            .await
+            .map_err(Error::from)?;
         channel
             .request_pty(true, &params.term, params.cols, params.rows, 0, 0, &[])
             .await?;
         channel.request_shell(true).await?;
         self.emit(SessionEvent::Connected).await;
-        let result = self.shell_loop(channel).await;
-        let _ = handle
-            .disconnect(russh::Disconnect::ByApplication, "", "en")
-            .await;
-        result
+        // Dropping the last `SharedConn` disconnects; tunnels may keep it alive.
+        self.shell_loop(channel).await
     }
 
     /// Connect and verify the host key, relaying the host-key prompt to the UI.
@@ -304,6 +391,10 @@ impl Actor {
                 res = &mut fut => return res.map_err(Error::from),
                 () = &mut deadline, if !deciding => return Err(Error::Timeout),
                 Some(req) = prompt_rx.recv() => {
+                    if self.headless {
+                        let _ = req.reply.send(false);
+                        return Err(Error::Other(format!("host key not trusted yet: {NEEDS_TERMINAL}")));
+                    }
                     deciding = true;
                     pending = Some(req.reply);
                     let ok = self.emit(SessionEvent::HostKeyPrompt {
@@ -335,6 +426,9 @@ impl Actor {
         instructions: &str,
         prompts: Vec<AuthPromptItem>,
     ) -> Result<Vec<SecretString>, Error> {
+        if self.headless {
+            return Err(Error::Other(format!("authentication {NEEDS_TERMINAL}")));
+        }
         self.emit(SessionEvent::AuthPrompt {
             name: name.into(),
             instructions: instructions.into(),
