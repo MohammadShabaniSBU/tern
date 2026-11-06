@@ -158,6 +158,9 @@ actions! {
     Delete       => "item.delete",    "Delete selected",       List, ["d d"], N;
     NewGroup     => "group.new",      "New group (nested under selected group)", List, ["shift+a"], N;
     MoveToGroup  => "host.move",      "Move host to group",    List, ["m"], N;
+    ImportKey    => "key.import",     "Import SSH key from file", List, ["i"], N;
+    PasteKey     => "key.paste",      "Import SSH key from clipboard", List, ["shift+p"], N;
+    CopyPublicKey => "key.copy_public", "Copy public key",     List, ["shift+y"], N;
     Duplicate    => "item.duplicate", "Duplicate selected",    List, ["y"], N;
     ToggleTunnels => "item.tunnels",  "Start/stop host tunnels", List, ["t"], N;
     // Forms

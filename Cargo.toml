@@ -58,5 +58,3 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.crypto-bigint]
 opt-level = 3
-[profile.dev.package.num-bigint-dig]
-opt-level = 3

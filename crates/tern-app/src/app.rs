@@ -11,7 +11,9 @@ use crate::action::{Action, Section};
 use crate::auth::{self, AuthFailure, AuthForm, CONFIRM_ID, PASSWORD_ID, Sensitive, retry_delay};
 use crate::host_form::{self, Choice, Field, HostForm, Picker};
 use crate::hosts_view::{HostSort, HostsData};
+use crate::key_form::{self, KeyForm, KeyMode};
 use crate::keymap::{self, Chord, Context, Keymap, Matcher, Outcome};
+use crate::keys_view::KeysData;
 use crate::list::{self, ListState};
 use crate::modal::{self, Modal, ModalStack, Pending};
 use crate::palette::{self, Palette, Target};
@@ -110,6 +112,8 @@ pub struct State {
     host_data: HostsData,
     host_sort: HostSort,
     host_form: Option<HostForm>,
+    keys_data: KeysData,
+    key_form: Option<KeyForm>,
     prompt: Option<Prompt>,
     palette: Palette,
 }
@@ -161,6 +165,14 @@ pub enum Message {
     /// Enter in a form field.
     FormSave,
     HostSaved(Result<String, String>),
+    KeysLoaded(Result<KeysData, String>),
+    KeyPathChanged(String),
+    KeyLabelChanged(String),
+    KeyPassphraseChanged(Sensitive),
+    KeyKindPicked(tern_ssh::keys::KeyKind),
+    KeySubmit,
+    KeySaved(Result<String, String>),
+    ClipboardRead(Option<String>),
     PromptChanged(String),
     PromptSubmit,
     /// A group/move operation finished; the string is a toast message.
@@ -192,6 +204,8 @@ impl State {
             host_data: HostsData::default(),
             host_sort: HostSort::default(),
             host_form: None,
+            keys_data: KeysData::default(),
+            key_form: None,
             prompt: None,
             palette: Palette::default(),
         };
@@ -352,6 +366,45 @@ impl State {
                 Task::none()
             }
             Message::FormSave => self.save_host_form(),
+            Message::KeysLoaded(r) => {
+                if let Err(e) = &r {
+                    tracing::error!(error = %e, "could not load keys");
+                    self.toast(ToastKind::Error, "Could not load keys");
+                }
+                self.keys_data = r.unwrap_or_default();
+                let items = self.keys_data.items();
+                self.lists[1].replace_items(items);
+                Task::none()
+            }
+            Message::KeyPathChanged(v) => self.edit_key_form(|f| f.path = v),
+            Message::KeyLabelChanged(v) => self.edit_key_form(|f| f.label = v),
+            Message::KeyPassphraseChanged(v) => self.edit_key_form(|f| f.passphrase = v),
+            Message::KeyKindPicked(k) => self.edit_key_form(|f| f.kind = k),
+            Message::KeySubmit => self.submit_key_form(),
+            Message::KeySaved(Ok(label)) => {
+                self.key_form = None;
+                self.mode = Mode::Normal;
+                self.toast(ToastKind::Success, format!("Saved key '{label}'"));
+                self.reload_keys()
+            }
+            Message::KeySaved(Err(e)) => {
+                if let Some(f) = &mut self.key_form {
+                    f.busy = false;
+                    f.error = Some(e);
+                }
+                Task::none()
+            }
+            Message::ClipboardRead(text) => match text.filter(|t| !t.trim().is_empty()) {
+                Some(t) => {
+                    let mut f = KeyForm::new(KeyMode::Paste);
+                    f.pasted = Sensitive::new(t);
+                    self.open_key_form(f)
+                }
+                None => {
+                    self.toast(ToastKind::Info, "Clipboard is empty");
+                    Task::none()
+                }
+            },
             Message::PromptChanged(v) => {
                 if let Some(p) = &mut self.prompt {
                     p.input = v;
@@ -383,7 +436,7 @@ impl State {
             }
             Message::ItemDeleted(Ok(label)) => {
                 self.toast(ToastKind::Success, format!("Deleted '{label}'"));
-                self.reload_hosts()
+                Task::batch([self.reload_hosts(), self.reload_keys()])
             }
             Message::ItemDeleted(Err(e)) => {
                 tracing::error!(error = %e, "delete failed");
@@ -401,6 +454,8 @@ impl State {
                 self.host_data = HostsData::default();
                 self.host_form = None;
                 self.prompt = None;
+                self.key_form = None;
+                self.keys_data = KeysData::default();
                 self.modals.clear();
                 iced::widget::operation::focus(PASSWORD_ID)
             }
@@ -467,10 +522,38 @@ impl State {
                 }
             }
             Action::NewGroup | Action::MoveToGroup => Task::none(),
+            Action::Add if self.section == Section::Keys => {
+                self.open_key_form(KeyForm::new(KeyMode::Generate))
+            }
+            Action::ImportKey if self.section == Section::Keys => {
+                self.open_key_form(KeyForm::new(KeyMode::ImportFile))
+            }
+            Action::PasteKey if self.section == Section::Keys => {
+                iced::clipboard::read().map(Message::ClipboardRead)
+            }
+            Action::CopyPublicKey if self.section == Section::Keys => {
+                let key = self
+                    .list()
+                    .selected_item()
+                    .and_then(|i| i.id.as_deref())
+                    .and_then(|id| self.keys_data.key(id));
+                match key {
+                    Some(k) => {
+                        let public = k.public_key.clone();
+                        self.toast(ToastKind::Success, "Copied public key");
+                        iced::clipboard::write(public)
+                    }
+                    None => Task::none(),
+                }
+            }
+            Action::ImportKey | Action::PasteKey | Action::CopyPublicKey => Task::none(),
             Action::Add | Action::Edit => self.open_host_form(action == Action::Edit),
+            Action::FormSave if self.key_form.is_some() => self.submit_key_form(),
             Action::FormSave => self.save_host_form(),
-            Action::FormNext if self.host_form.is_some() => iced::widget::operation::focus_next(),
-            Action::FormPrev if self.host_form.is_some() => {
+            Action::FormNext if self.host_form.is_some() || self.key_form.is_some() => {
+                iced::widget::operation::focus_next()
+            }
+            Action::FormPrev if self.host_form.is_some() || self.key_form.is_some() => {
                 iced::widget::operation::focus_previous()
             }
             Action::FormNext | Action::FormPrev => Task::none(),
@@ -607,6 +690,10 @@ impl State {
 
     /// `Esc`: move one step outwards. Modal -> palette -> insert -> clear the filter.
     fn back(&mut self) -> Task<Message> {
+        if self.key_form.as_ref().is_some_and(|f| !f.busy) {
+            self.key_form = None;
+            return self.leave_insert();
+        }
         if self.prompt.take().is_some() {
             return self.leave_insert();
         }
@@ -686,7 +773,7 @@ impl State {
     fn run_pending(&mut self, pending: Pending) -> Task<Message> {
         match pending {
             Pending::DeleteSelected => {
-                let real = (self.section == Section::Hosts)
+                let real = matches!(self.section, Section::Hosts | Section::Keys)
                     .then(|| self.list().selected_item())
                     .flatten()
                     .and_then(|i| {
@@ -781,6 +868,87 @@ impl State {
         )
     }
 
+    fn open_key_form(&mut self, form: KeyForm) -> Task<Message> {
+        let first = form.first_field();
+        self.key_form = Some(form);
+        self.mode = Mode::Insert;
+        self.matcher.reset();
+        iced::widget::operation::focus(first)
+    }
+
+    fn edit_key_form(&mut self, f: impl FnOnce(&mut KeyForm)) -> Task<Message> {
+        if let Some(form) = &mut self.key_form {
+            f(form);
+            form.error = None;
+        }
+        Task::none()
+    }
+
+    fn reload_keys(&self) -> Task<Message> {
+        let store = self.store.clone();
+        Task::perform(async move { load_keys(&store).await }, |r| {
+            Message::KeysLoaded(r.map_err(|e| e.to_string()))
+        })
+    }
+
+    fn submit_key_form(&mut self) -> Task<Message> {
+        use tern_ssh::keys;
+        let Some(form) = &mut self.key_form else {
+            return Task::none();
+        };
+        if form.busy {
+            return Task::none();
+        }
+        let label = form.effective_label();
+        if label.is_empty() {
+            form.error = Some("label must not be empty".into());
+            return Task::none();
+        }
+        form.busy = true;
+        form.error = None;
+        let mode = form.mode;
+        let kind = form.kind;
+        let path = form.path.trim().to_owned();
+        let pasted = form.pasted.clone();
+        let passphrase =
+            (!form.passphrase.is_empty()).then(|| form.passphrase.clone().take_secret());
+        let store = self.store.clone();
+        Task::perform(
+            async move {
+                let work =
+                    tokio::task::spawn_blocking(move || -> Result<keys::KeyMaterial, String> {
+                        let comment = "tern";
+                        match mode {
+                            KeyMode::Generate => keys::generate(kind, comment, passphrase.as_ref()),
+                            KeyMode::ImportFile => {
+                                let text = std::fs::read_to_string(expand_home(&path))
+                                    .map_err(|e| format!("cannot read file: {e}"))?;
+                                keys::import(&text, "", passphrase.as_ref())
+                            }
+                            KeyMode::Paste => {
+                                keys::import(pasted.as_str(), "", passphrase.as_ref())
+                            }
+                        }
+                        .map_err(|e| e.to_string())
+                    });
+                let material = work.await.map_err(|e| e.to_string())??;
+                let meta = tern_core::SshKeyMeta {
+                    id: tern_core::KeyId::new(),
+                    label: label.clone(),
+                    key_type: material.key_type,
+                    public_key: material.public_key,
+                    fingerprint: material.fingerprint,
+                };
+                store
+                    .insert_key(meta, material.private_pem, material.passphrase)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(label)
+            },
+            Message::KeySaved,
+        )
+    }
+
     fn open_host_form(&mut self, edit: bool) -> Task<Message> {
         if self.section != Section::Hosts {
             self.toast(ToastKind::Info, "Not available for this section yet");
@@ -847,10 +1015,14 @@ impl State {
 
     fn delete_host_or_group(&mut self, id: &str, is_group: bool, label: String) -> Task<Message> {
         let store = self.store.clone();
+        let is_key = self.section == Section::Keys;
         let id = id.to_owned();
         Task::perform(
             async move {
-                if is_group {
+                if is_key {
+                    let kid = id.parse().map_err(|e| format!("{e}"))?;
+                    store.delete_key(kid).await.map_err(|e| e.to_string())?;
+                } else if is_group {
                     let gid = id.parse().map_err(|e| format!("{e}"))?;
                     store.delete_group(gid).await.map_err(|e| e.to_string())?;
                 } else {
@@ -1003,7 +1175,7 @@ impl State {
                 |r| Message::SettingsLoaded(r.map_err(|e| e.to_string())),
             )
         };
-        Task::batch([hosts, keymap])
+        Task::batch([hosts, keymap, self.reload_keys()])
     }
 
     pub fn view(&self) -> Element<'_, Message> {
@@ -1071,6 +1243,11 @@ impl State {
                 .as_deref()
                 .and_then(|id| self.host_data.host_detail(id))
                 .unwrap_or_else(|| item.label.clone()),
+            Some(item) if self.section == Section::Keys && item.id.is_some() => item
+                .id
+                .as_deref()
+                .and_then(|id| self.keys_data.detail(id))
+                .unwrap_or_else(|| item.label.clone()),
             Some(item) => format!(
                 "{}\n\n(details arrive with the {} screen, Sprint 3)",
                 item.label,
@@ -1112,6 +1289,9 @@ impl State {
         }
         if let Some(p) = &self.prompt {
             return iced::widget::stack![base, prompt::view(p)].into();
+        }
+        if let Some(f) = &self.key_form {
+            return iced::widget::stack![base, key_form::view(f)].into();
         }
         match (self.modals.top(), self.mode) {
             (Some(m), _) => iced::widget::stack![base, modal::view(m, &self.keymap)].into(),
@@ -1181,6 +1361,21 @@ fn selected_row_style(theme: &Theme, selected: bool) -> container::Style {
 /// Bundled monospace font (JetBrains Mono, SIL OFL 1.1; licence in `assets/fonts/OFL.txt`).
 pub const FONT_BYTES: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf");
 pub const MONO: Font = Font::with_name("JetBrains Mono");
+
+/// `~/` -> home directory; anything else unchanged.
+fn expand_home(path: &str) -> std::path::PathBuf {
+    match (path.strip_prefix("~/"), directories::UserDirs::new()) {
+        (Some(rest), Some(dirs)) => dirs.home_dir().join(rest),
+        _ => std::path::PathBuf::from(path),
+    }
+}
+
+async fn load_keys(store: &Store) -> tern_store::Result<KeysData> {
+    Ok(KeysData {
+        keys: store.list_keys().await?,
+        created: store.key_created_at().await?,
+    })
+}
 
 /// Load everything the Hosts section shows.
 async fn load_hosts(store: &Store) -> tern_store::Result<HostsData> {

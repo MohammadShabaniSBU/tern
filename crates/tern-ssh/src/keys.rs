@@ -32,6 +32,12 @@ impl KeyKind {
     }
 }
 
+impl std::fmt::Display for KeyKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum KeyError {
     #[error("the key is encrypted; a passphrase is required")]
