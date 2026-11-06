@@ -1,0 +1,15 @@
+[package]
+name = "tern-app"
+description = "tern GUI application"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+tern-core.workspace = true
+tern-vault.workspace = true
+tern-store.workspace = true
+tern-ssh.workspace = true
+tern-term.workspace = true
+tern-io.workspace = true

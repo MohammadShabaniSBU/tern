@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+tracing = "0.1"
+uuid = { version = "1", features = ["v4", "serde"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+
+tern-core = { path = "crates/tern-core" }
+tern-vault = { path = "crates/tern-vault" }
+tern-store = { path = "crates/tern-store" }
+tern-ssh = { path = "crates/tern-ssh" }
+tern-term = { path = "crates/tern-term" }
+tern-io = { path = "crates/tern-io" }

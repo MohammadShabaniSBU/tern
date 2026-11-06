@@ -1,0 +1,12 @@
+[package]
+name = "tern-store"
+description = "SQLite schema and repositories"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+tern-core.workspace = true
+tern-vault.workspace = true

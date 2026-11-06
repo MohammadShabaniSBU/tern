@@ -1,0 +1,13 @@
+[package]
+name = "tern-io"
+description = "Import/export"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+tern-core.workspace = true
+tern-vault.workspace = true
+tern-store.workspace = true
