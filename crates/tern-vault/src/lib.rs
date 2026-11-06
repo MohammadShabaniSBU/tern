@@ -1,10 +1,13 @@
-//! tern-vault: stub (filled in by a later sprint).
+//! Key derivation, authenticated encryption and secret handling for tern.
+//!
+//! Nothing in this crate ever logs or `Debug`-prints key material: keys and decrypted plaintexts
+//! are wrapped in [`secrecy::SecretBox`] (zeroized on drop, redacted `Debug`).
 
-/// Errors produced by `tern-vault`. Variants are added as functionality lands.
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    #[error("{0}")]
-    Other(String),
-}
+mod crypto;
+mod error;
 
-pub type Result<T, E = Error> = std::result::Result<T, E>;
+pub use crypto::{
+    KEY_LEN, KdfParams, Key, SALT_LEN, VERSION, derive_kek, generate_salt, open, seal,
+};
+pub use error::{Error, Result};
+pub use secrecy::{ExposeSecret, SecretBox, SecretString};
