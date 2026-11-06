@@ -12,6 +12,7 @@ use crate::auth::{self, AuthFailure, AuthForm, CONFIRM_ID, PASSWORD_ID, Sensitiv
 use crate::keymap::{self, Chord, Context, Keymap, Matcher, Outcome};
 use crate::list::{self, ListState};
 use crate::modal::{self, Modal, ModalStack, Pending};
+use crate::palette::{self, Palette, Target};
 use crate::toast::{ToastKind, Toasts};
 
 /// Which part of the app owns the keyboard. See `docs/KEYBINDINGS.md`.
@@ -100,7 +101,17 @@ pub struct State {
     form: AuthForm,
     keymap: Keymap,
     matcher: Matcher,
-    host_count: Option<usize>,
+    /// Host labels for the palette's "Connect: …" entries.
+    hosts: Vec<String>,
+    palette: Palette,
+}
+
+/// Settings read from the `settings` table after unlocking.
+#[derive(Debug, Clone)]
+pub struct LoadedSettings {
+    leader: Option<String>,
+    keymap: Option<String>,
+    recent: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -113,19 +124,21 @@ pub enum Message {
     /// Enter in the confirm field, or the create button.
     SubmitConfirm,
     AuthDone(Result<(), AuthFailure>),
-    HostsLoaded(Result<usize, String>),
+    HostsLoaded(Result<Vec<String>, String>),
     SpinnerTick,
     /// Enter pressed anywhere; only meaningful on the recovery warning.
     Acknowledge,
     FocusNext,
     FocusPrevious,
     /// Run an action; the single entry point shared by keymap and palette.
-    #[allow(dead_code)] // constructed by the command palette (S2-T04)
+    #[allow(dead_code)] // constructed by mouse-clickable UI in S2-T08
     Dispatch(Action),
     /// A key press on the main screen, routed through the keymap engine.
     Key(Chord),
     /// `(leader, keymap overrides)` JSON from the settings table.
-    KeymapLoaded(Result<(Option<String>, Option<String>), String>),
+    SettingsLoaded(Result<LoadedSettings, String>),
+    PaletteQueryChanged(String),
+    RecentSaved(Result<(), String>),
     Locked(Result<(), String>),
     ToastTick(Instant),
     FilterChanged(String),
@@ -155,7 +168,8 @@ impl State {
             form: AuthForm::default(),
             keymap: Keymap::defaults(),
             matcher: Matcher::default(),
-            host_count: None,
+            hosts: Vec::new(),
+            palette: Palette::default(),
         };
         (state, check)
     }
@@ -223,7 +237,7 @@ impl State {
                     tracing::error!(error = %e, "could not load hosts");
                     self.toast(ToastKind::Error, "Could not load hosts");
                 }
-                self.host_count = result.ok();
+                self.hosts = result.unwrap_or_default();
                 Task::none()
             }
             Message::SpinnerTick => {
@@ -246,10 +260,26 @@ impl State {
                     Outcome::Pending | Outcome::Unhandled => Task::none(),
                 }
             }
-            Message::KeymapLoaded(result) => {
+            Message::RecentSaved(result) => {
+                if let Err(e) = result {
+                    tracing::warn!(error = %e, "could not save palette recents");
+                }
+                Task::none()
+            }
+            Message::PaletteQueryChanged(q) => {
+                self.palette.set_query(q);
+                Task::none()
+            }
+            Message::SettingsLoaded(result) => {
                 match result {
-                    Ok((leader, overrides)) => {
-                        self.keymap = Keymap::build(leader.as_deref(), overrides.as_deref());
+                    Ok(loaded) => {
+                        let recent: Vec<String> = loaded
+                            .recent
+                            .and_then(|json| serde_json::from_str(&json).ok())
+                            .unwrap_or_default();
+                        self.palette.set_recent(recent);
+                        self.keymap =
+                            Keymap::build(loaded.leader.as_deref(), loaded.keymap.as_deref());
                         self.matcher.reset();
                         let problems = self.keymap.warnings.len() + self.keymap.conflicts.len();
                         if problems > 0 {
@@ -283,7 +313,7 @@ impl State {
                 // Even if the store reported an error, leave the main screen.
                 self.screen = Screen::Unlock;
                 self.mode = Mode::Normal;
-                self.host_count = None;
+                self.hosts.clear();
                 self.modals.clear();
                 iced::widget::operation::focus(PASSWORD_ID)
             }
@@ -373,13 +403,27 @@ impl State {
                 }
                 self.scroll_list(false)
             }
-            Action::OpenPalette => {
-                self.mode = match self.mode {
-                    Mode::Palette => Mode::Normal,
-                    _ => Mode::Palette,
-                };
+            Action::OpenPalette => match self.mode {
+                Mode::Palette => {
+                    self.mode = Mode::Normal;
+                    Task::none()
+                }
+                _ => {
+                    self.palette.open(&self.keymap, &self.hosts);
+                    self.mode = Mode::Palette;
+                    self.matcher.reset();
+                    iced::widget::operation::focus(palette::PALETTE_ID)
+                }
+            },
+            Action::PaletteDown => {
+                self.palette.move_selection(1);
                 Task::none()
             }
+            Action::PaletteUp => {
+                self.palette.move_selection(-1);
+                Task::none()
+            }
+            Action::PaletteRun => self.run_palette_selection(),
             Action::LockVault => {
                 let store = self.store.clone();
                 Task::perform(async move { store.lock().await }, |r| {
@@ -423,6 +467,37 @@ impl State {
 
     fn toast(&mut self, kind: ToastKind, text: impl Into<String>) {
         self.toasts.push(kind, text, Instant::now());
+    }
+
+    fn run_palette_selection(&mut self) -> Task<Message> {
+        let Some(entry) = self.palette.selected_entry().cloned() else {
+            return Task::none();
+        };
+        self.mode = Mode::Normal;
+        self.palette.record_use(&entry.recent_key);
+        let save = {
+            let store = self.store.clone();
+            let json = serde_json::to_string(self.palette.recent()).unwrap_or_default();
+            Task::perform(
+                async move {
+                    store
+                        .query(move |db| db.settings().set(palette::RECENT_SETTING, &json))
+                        .await
+                },
+                |r| Message::RecentSaved(r.map_err(|e| e.to_string())),
+            )
+        };
+        let run = match entry.target {
+            Target::Action(action) => self.dispatch(action),
+            Target::Connect(label) => {
+                self.toast(
+                    ToastKind::Info,
+                    format!("Connecting to '{label}' arrives with the SSH engine"),
+                );
+                Task::none()
+            }
+        };
+        Task::batch([save, run])
     }
 
     fn sync_modal_mode(&mut self) {
@@ -564,7 +639,12 @@ impl State {
         let hosts = {
             let store = self.store.clone();
             Task::perform(
-                async move { store.list_hosts().await.map(|h| h.len()) },
+                async move {
+                    store
+                        .list_hosts()
+                        .await
+                        .map(|h| h.into_iter().map(|h| h.label).collect())
+                },
                 |r| Message::HostsLoaded(r.map_err(|e| e.to_string())),
             )
         };
@@ -575,11 +655,15 @@ impl State {
                     store
                         .query(|db| {
                             let s = db.settings();
-                            Ok((s.get("leader")?, s.get("keymap")?))
+                            Ok(LoadedSettings {
+                                leader: s.get("leader")?,
+                                keymap: s.get("keymap")?,
+                                recent: s.get(palette::RECENT_SETTING)?,
+                            })
                         })
                         .await
                 },
-                |r| Message::KeymapLoaded(r.map_err(|e| e.to_string())),
+                |r| Message::SettingsLoaded(r.map_err(|e| e.to_string())),
             )
         };
         Task::batch([hosts, keymap])
@@ -616,13 +700,7 @@ impl State {
             .height(Fill)
             .style(container::bordered_box);
 
-        let main_text = match self.mode {
-            Mode::Palette => "Command palette (placeholder)".to_owned(),
-            _ => match self.host_count {
-                Some(n) => format!("Vault unlocked — {n} host(s) stored"),
-                None => "Vault unlocked".to_owned(),
-            },
-        };
+        let main_text = format!("Vault unlocked — {} host(s) stored", self.hosts.len());
         let filter = text_input("Filter (/)", &self.list().filter)
             .id(FILTER_ID)
             .on_input(Message::FilterChanged)
@@ -659,9 +737,12 @@ impl State {
             .style(container::bordered_box);
 
         let base = column![row![sidebar, main_area].height(Fill), status_bar];
-        match self.modals.top() {
-            Some(m) => iced::widget::stack![base, modal::view(m)].into(),
-            None => base.into(),
+        match (self.modals.top(), self.mode) {
+            (Some(m), _) => iced::widget::stack![base, modal::view(m)].into(),
+            (None, Mode::Palette) => {
+                iced::widget::stack![base, palette::view(&self.palette)].into()
+            }
+            (None, _) => base.into(),
         }
     }
 
@@ -841,6 +922,32 @@ mod tests {
                 .current()
                 .is_some_and(|t| t.text.starts_with("Deleted"))
         );
+    }
+
+    /// The exit demo: Ctrl+K, type "lock", Enter.
+    #[test]
+    fn palette_lock_flow() {
+        let mut s = main_state();
+        let _ = s.update(Message::Dispatch(Action::OpenPalette));
+        assert_eq!(s.mode, Mode::Palette);
+        let _ = s.update(Message::PaletteQueryChanged("lock".into()));
+        let _ = s.update(Message::Dispatch(Action::PaletteRun));
+        assert_eq!(s.mode, Mode::Normal);
+        assert_eq!(s.palette.recent(), ["vault.lock"]);
+        // The lock itself completes asynchronously.
+        let _ = s.update(Message::Locked(Ok(())));
+        assert_eq!(s.screen, Screen::Unlock);
+    }
+
+    #[test]
+    fn running_a_host_entry_does_not_crash_and_closes_the_palette() {
+        let mut s = main_state();
+        let _ = s.update(Message::HostsLoaded(Ok(vec!["prod-db".into()])));
+        let _ = s.update(Message::Dispatch(Action::OpenPalette));
+        let _ = s.update(Message::PaletteQueryChanged("prod-db".into()));
+        let _ = s.update(Message::Dispatch(Action::PaletteRun));
+        assert_eq!(s.mode, Mode::Normal);
+        assert!(s.toasts.current().is_some());
     }
 
     #[test]

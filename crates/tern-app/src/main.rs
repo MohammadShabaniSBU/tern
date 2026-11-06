@@ -5,6 +5,7 @@ mod keymap;
 mod list;
 mod logging;
 mod modal;
+mod palette;
 mod paths;
 mod toast;
 
