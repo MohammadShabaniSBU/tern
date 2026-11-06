@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use iced::widget::{column, container, row, space, text};
+use iced::widget::{column, container, row, space, text, text_input};
 use iced::{Element, Fill, Subscription, Task, Theme};
 use tern_store::Store;
 
@@ -16,8 +16,12 @@ use crate::keymap::{self, Chord, Context, Keymap, Matcher, Outcome};
 pub enum Mode {
     #[default]
     Normal,
-    // Insert is added when text inputs / terminals land (Sprint 2).
+    /// A text input (list filter, later forms and terminals) owns plain keys.
+    Insert,
     Palette,
+    /// A modal dialog owns the keyboard.
+    #[allow(dead_code)] // constructed by the modal stack (S2-T06)
+    Modal,
 }
 
 impl Mode {
@@ -25,17 +29,47 @@ impl Mode {
     pub fn mask(self) -> ModeMask {
         match self {
             Mode::Normal => ModeMask::NORMAL,
+            Mode::Insert => ModeMask::INSERT,
             Mode::Palette => ModeMask::PALETTE,
+            Mode::Modal => ModeMask::MODAL,
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
             Mode::Normal => "NORMAL",
+            Mode::Insert => "INSERT",
             Mode::Palette => "PALETTE",
+            Mode::Modal => "MODAL",
         }
     }
 }
+
+/// Which pane has keyboard focus. Exactly one always does, so something is always highlighted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Pane {
+    Sidebar,
+    #[default]
+    List,
+    #[allow(dead_code)] // reachable once detail views exist (Sprint 3)
+    Detail,
+    #[allow(dead_code)] // reachable once terminal tabs exist (Sprint 5)
+    Tab,
+}
+
+impl Pane {
+    pub fn label(self) -> &'static str {
+        match self {
+            Pane::Sidebar => "sidebar",
+            Pane::List => "list",
+            Pane::Detail => "detail",
+            Pane::Tab => "tab",
+        }
+    }
+}
+
+/// Widget id of the list filter input.
+pub const FILTER_ID: &str = "list-filter";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
@@ -57,6 +91,8 @@ pub struct State {
     pub screen: Screen,
     pub mode: Mode,
     pub section: Section,
+    pub pane: Pane,
+    pub filter: String,
     form: AuthForm,
     keymap: Keymap,
     matcher: Matcher,
@@ -87,6 +123,9 @@ pub enum Message {
     /// `(leader, keymap overrides)` JSON from the settings table.
     KeymapLoaded(Result<(Option<String>, Option<String>), String>),
     Locked(Result<(), String>),
+    FilterChanged(String),
+    /// Enter in the filter input: keep the filter, return to Normal mode.
+    FilterSubmitted,
 }
 
 impl State {
@@ -102,6 +141,8 @@ impl State {
             screen: Screen::Loading,
             mode: Mode::Normal,
             section: Section::default(),
+            pane: Pane::default(),
+            filter: String::new(),
             form: AuthForm::default(),
             keymap: Keymap::defaults(),
             matcher: Matcher::default(),
@@ -202,6 +243,11 @@ impl State {
                 }
                 Task::none()
             }
+            Message::FilterChanged(text) => {
+                self.filter = text;
+                Task::none()
+            }
+            Message::FilterSubmitted => self.leave_insert(),
             Message::Locked(result) => {
                 if let Err(e) = result {
                     tracing::error!(error = %e, "lock failed");
@@ -227,6 +273,20 @@ impl State {
             return Task::none();
         }
         match action {
+            Action::Back => self.back(),
+            Action::Filter => {
+                self.mode = Mode::Insert;
+                self.pane = Pane::List;
+                iced::widget::operation::focus(FILTER_ID)
+            }
+            Action::Collapse => {
+                self.pane = Pane::Sidebar;
+                Task::none()
+            }
+            Action::Expand => {
+                self.pane = Pane::List;
+                Task::none()
+            }
             Action::OpenPalette => {
                 self.mode = match self.mode {
                     Mode::Palette => Mode::Normal,
@@ -243,6 +303,29 @@ impl State {
             // Registered for the keymap/palette; implemented by later tasks and sprints.
             _ => Task::none(),
         }
+    }
+
+    /// `Esc`: move one step outwards. Modal -> palette -> insert -> clear the filter.
+    fn back(&mut self) -> Task<Message> {
+        match self.mode {
+            // The modal stack (S2-T06) pops one modal here before leaving Modal mode.
+            Mode::Modal | Mode::Palette => {
+                self.mode = Mode::Normal;
+                Task::none()
+            }
+            Mode::Insert => self.leave_insert(),
+            Mode::Normal => {
+                self.filter.clear();
+                Task::none()
+            }
+        }
+    }
+
+    fn leave_insert(&mut self) -> Task<Message> {
+        self.mode = Mode::Normal;
+        self.matcher.reset();
+        // Drop widget focus so the keys we now handle are not also typed into the field.
+        iced::advanced::widget::operate(iced::advanced::widget::operation::focusable::unfocus())
     }
 
     fn submit_unlock(&mut self) -> Task<Message> {
@@ -351,38 +434,48 @@ impl State {
     }
 
     fn main_view(&self) -> Element<'_, Message> {
-        let sidebar = container(
-            column![
-                text("tern").size(20),
-                space().height(12),
-                text("Hosts"),
-                text("Keys"),
-                text("Identities"),
-                text("Tunnels"),
-            ]
-            .spacing(6),
-        )
-        .padding(12)
-        .width(200)
-        .height(Fill)
-        .style(container::bordered_box);
+        let mut nav = column![text("tern").size(20), space().height(12)].spacing(6);
+        for section in Section::ALL {
+            let label = if section == self.section {
+                format!("> {}", section.label())
+            } else {
+                format!("  {}", section.label())
+            };
+            nav = nav.push(text(label));
+        }
+        let sidebar = container(nav)
+            .padding(12)
+            .width(200)
+            .height(Fill)
+            .style(container::bordered_box);
 
         let main_text = match self.mode {
             Mode::Palette => "Command palette (placeholder)".to_owned(),
-            Mode::Normal => match self.host_count {
+            _ => match self.host_count {
                 Some(n) => format!("Vault unlocked — {n} host(s) stored"),
                 None => "Vault unlocked".to_owned(),
             },
         };
-        let main_area = container(text(main_text).size(18))
+        let filter = text_input("Filter (/)", &self.filter)
+            .id(FILTER_ID)
+            .on_input(Message::FilterChanged)
+            .on_submit(Message::FilterSubmitted);
+        let main_area = container(column![filter, text(main_text).size(18)].spacing(12))
             .padding(12)
             .width(Fill)
             .height(Fill);
 
-        let status_bar = container(text(self.mode.label()).size(14))
-            .padding([4, 12])
-            .width(Fill)
-            .style(container::bordered_box);
+        let status_bar = container(
+            text(format!(
+                "-- {} --   {}",
+                self.mode.label(),
+                self.pane.label()
+            ))
+            .size(14),
+        )
+        .padding([4, 12])
+        .width(Fill)
+        .style(container::bordered_box);
 
         column![row![sidebar, main_area].height(Fill), status_bar].into()
     }
@@ -461,6 +554,47 @@ mod tests {
         let mut s = main_state();
         let _ = s.update(Message::Dispatch(Action::GoTunnels));
         assert_eq!(s.section, Section::Tunnels);
+    }
+
+    #[test]
+    fn esc_moves_one_step_outwards() {
+        let mut s = main_state();
+        s.filter = "prod".into();
+
+        // Insert -> Normal keeps the filter; the next Esc clears it.
+        let _ = s.update(Message::Dispatch(Action::Filter));
+        assert_eq!((s.mode, s.pane), (Mode::Insert, Pane::List));
+        let _ = s.update(Message::Dispatch(Action::Back));
+        assert_eq!(s.mode, Mode::Normal);
+        assert_eq!(s.filter, "prod");
+        let _ = s.update(Message::Dispatch(Action::Back));
+        assert!(s.filter.is_empty());
+
+        // Palette -> Normal.
+        let _ = s.update(Message::Dispatch(Action::OpenPalette));
+        assert_eq!(s.mode, Mode::Palette);
+        let _ = s.update(Message::Dispatch(Action::Back));
+        assert_eq!(s.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn submitting_the_filter_leaves_insert_mode() {
+        let mut s = main_state();
+        let _ = s.update(Message::Dispatch(Action::Filter));
+        let _ = s.update(Message::FilterChanged("x".into()));
+        let _ = s.update(Message::FilterSubmitted);
+        assert_eq!(s.mode, Mode::Normal);
+        assert_eq!(s.filter, "x");
+    }
+
+    #[test]
+    fn pane_focus_always_has_a_value_and_h_l_move_it() {
+        let mut s = main_state();
+        assert_eq!(s.pane, Pane::List);
+        let _ = s.update(Message::Dispatch(Action::Collapse));
+        assert_eq!(s.pane, Pane::Sidebar);
+        let _ = s.update(Message::Dispatch(Action::Expand));
+        assert_eq!(s.pane, Pane::List);
     }
 
     #[test]
