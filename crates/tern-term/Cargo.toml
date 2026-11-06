@@ -11,4 +11,5 @@ workspace = true
 
 [dependencies]
 alacritty_terminal = "0.26"
+iced.workspace = true
 thiserror.workspace = true

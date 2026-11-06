@@ -1,6 +1,7 @@
 //! tern-term: terminal emulation adapter (and, later, the iced widget).
 
 pub mod emu;
+pub mod input;
 
 pub use emu::{
     Cell, CellFlags, Color, Cursor, CursorShape, Emulator, Modes, RowSpan, SelectKind, Snapshot,

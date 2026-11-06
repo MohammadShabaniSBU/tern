@@ -4469,6 +4469,7 @@ name = "tern-term"
 version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
+ "iced",
  "thiserror 2.0.21",
 ]
 
