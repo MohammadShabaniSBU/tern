@@ -9,6 +9,7 @@ use tern_store::Store;
 use crate::action::ModeMask;
 use crate::action::{Action, Section};
 use crate::auth::{self, AuthFailure, AuthForm, CONFIRM_ID, PASSWORD_ID, Sensitive, retry_delay};
+use crate::hosts_view::{HostSort, HostsData};
 use crate::keymap::{self, Chord, Context, Keymap, Matcher, Outcome};
 use crate::list::{self, ListState};
 use crate::modal::{self, Modal, ModalStack, Pending};
@@ -104,6 +105,8 @@ pub struct State {
     matcher: Matcher,
     /// Host labels for the palette's "Connect: …" entries.
     hosts: Vec<String>,
+    host_data: HostsData,
+    host_sort: HostSort,
     palette: Palette,
 }
 
@@ -126,7 +129,7 @@ pub enum Message {
     /// Enter in the confirm field, or the create button.
     SubmitConfirm,
     AuthDone(Result<(), AuthFailure>),
-    HostsLoaded(Result<Vec<String>, String>),
+    HostsLoaded(Result<HostsData, String>),
     SpinnerTick,
     /// Enter pressed anywhere; only meaningful on the recovery warning.
     Acknowledge,
@@ -147,6 +150,8 @@ pub enum Message {
     ListScrolled(f32, f32),
     /// Enter in the filter input: keep the filter, return to Normal mode.
     FilterSubmitted,
+    /// A host or group was deleted from the store (label), or the attempt failed.
+    ItemDeleted(Result<String, String>),
 }
 
 impl State {
@@ -171,6 +176,8 @@ impl State {
             keymap: Keymap::defaults(),
             matcher: Matcher::default(),
             hosts: Vec::new(),
+            host_data: HostsData::default(),
+            host_sort: HostSort::default(),
             palette: Palette::default(),
         };
         (state, check)
@@ -239,7 +246,14 @@ impl State {
                     tracing::error!(error = %e, "could not load hosts");
                     self.toast(ToastKind::Error, "Could not load hosts");
                 }
-                self.hosts = result.unwrap_or_default();
+                self.host_data = result.unwrap_or_default();
+                self.hosts = self
+                    .host_data
+                    .hosts
+                    .iter()
+                    .map(|h| h.label.clone())
+                    .collect();
+                self.rebuild_hosts_list();
                 Task::none()
             }
             Message::SpinnerTick => {
@@ -310,6 +324,15 @@ impl State {
                 Task::none()
             }
             Message::FilterSubmitted => self.leave_insert(),
+            Message::ItemDeleted(Ok(label)) => {
+                self.toast(ToastKind::Success, format!("Deleted '{label}'"));
+                self.reload_hosts()
+            }
+            Message::ItemDeleted(Err(e)) => {
+                tracing::error!(error = %e, "delete failed");
+                self.toast(ToastKind::Error, "Delete failed");
+                Task::none()
+            }
             Message::Locked(result) => {
                 if let Err(e) = result {
                     tracing::error!(error = %e, "lock failed");
@@ -318,6 +341,7 @@ impl State {
                 self.screen = Screen::Unlock;
                 self.mode = Mode::Normal;
                 self.hosts.clear();
+                self.host_data = HostsData::default();
                 self.modals.clear();
                 iced::widget::operation::focus(PASSWORD_ID)
             }
@@ -349,6 +373,17 @@ impl State {
                     },
                     |r| Message::SettingSaved(r.map_err(|e| e.to_string())),
                 )
+            }
+            Action::SortToggle => {
+                if self.section == Section::Hosts {
+                    self.host_sort = self.host_sort.toggled();
+                    self.rebuild_hosts_list();
+                    self.toast(
+                        ToastKind::Info,
+                        format!("Sorted by {}", self.host_sort.label()),
+                    );
+                }
+                Task::none()
             }
             Action::Delete => {
                 if let Some(item) = self.list().selected_item() {
@@ -541,13 +576,54 @@ impl State {
     fn run_pending(&mut self, pending: Pending) -> Task<Message> {
         match pending {
             Pending::DeleteSelected => {
-                // Dummy data only; real deletion arrives with the host/key screens (Sprint 3).
+                let real = (self.section == Section::Hosts)
+                    .then(|| self.list().selected_item())
+                    .flatten()
+                    .and_then(|i| {
+                        i.id.clone()
+                            .map(|id| (id, i.group.is_some(), i.label.clone()))
+                    });
+                if let Some((id, is_group, label)) = real {
+                    return self.delete_host_or_group(&id, is_group, label);
+                }
+                // Sections not backed by the store yet still use dummy rows.
                 if let Some(label) = self.list_mut().remove_selected() {
                     self.toast(ToastKind::Success, format!("Deleted '{label}'"));
                 }
                 self.scroll_list(false)
             }
         }
+    }
+
+    /// Rebuild the Hosts list from `host_data`, keeping collapse state and selection.
+    fn rebuild_hosts_list(&mut self) {
+        let items = self.host_data.items(self.host_sort);
+        self.lists[0].replace_items(items);
+    }
+
+    fn reload_hosts(&self) -> Task<Message> {
+        let store = self.store.clone();
+        Task::perform(async move { load_hosts(&store).await }, |r| {
+            Message::HostsLoaded(r.map_err(|e| e.to_string()))
+        })
+    }
+
+    fn delete_host_or_group(&mut self, id: &str, is_group: bool, label: String) -> Task<Message> {
+        let store = self.store.clone();
+        let id = id.to_owned();
+        Task::perform(
+            async move {
+                if is_group {
+                    let gid = id.parse().map_err(|e| format!("{e}"))?;
+                    store.delete_group(gid).await.map_err(|e| e.to_string())?;
+                } else {
+                    let hid = id.parse().map_err(|e| format!("{e}"))?;
+                    store.delete_host(hid).await.map_err(|e| e.to_string())?;
+                }
+                Ok(label)
+            },
+            Message::ItemDeleted,
+        )
     }
 
     fn list(&self) -> &ListState {
@@ -667,15 +743,9 @@ impl State {
         self.mode = Mode::Normal;
         let hosts = {
             let store = self.store.clone();
-            Task::perform(
-                async move {
-                    store
-                        .list_hosts()
-                        .await
-                        .map(|h| h.into_iter().map(|h| h.label).collect())
-                },
-                |r| Message::HostsLoaded(r.map_err(|e| e.to_string())),
-            )
+            Task::perform(async move { load_hosts(&store).await }, |r| {
+                Message::HostsLoaded(r.map_err(|e| e.to_string()))
+            })
         };
         let keymap = {
             let store = self.store.clone();
@@ -759,6 +829,11 @@ impl State {
                 .style(pane_frame(self.pane == Pane::List));
 
         let detail_text = match self.list().selected_item() {
+            Some(item) if self.section == Section::Hosts && item.id.is_some() => item
+                .id
+                .as_deref()
+                .and_then(|id| self.host_data.host_detail(id))
+                .unwrap_or_else(|| item.label.clone()),
             Some(item) => format!(
                 "{}\n\n(details arrive with the {} screen, Sprint 3)",
                 item.label,
@@ -863,6 +938,16 @@ fn selected_row_style(theme: &Theme, selected: bool) -> container::Style {
 /// Bundled monospace font (JetBrains Mono, SIL OFL 1.1; licence in `assets/fonts/OFL.txt`).
 pub const FONT_BYTES: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf");
 pub const MONO: Font = Font::with_name("JetBrains Mono");
+
+/// Load everything the Hosts section shows.
+async fn load_hosts(store: &Store) -> tern_store::Result<HostsData> {
+    Ok(HostsData {
+        hosts: store.list_hosts().await?,
+        groups: store.list_groups().await?,
+        identities: store.list_identities().await?,
+        last_connected: store.host_last_connected().await?,
+    })
+}
 
 #[cfg(test)]
 mod tests {
@@ -1036,7 +1121,11 @@ mod tests {
     #[test]
     fn running_a_host_entry_does_not_crash_and_closes_the_palette() {
         let mut s = main_state();
-        let _ = s.update(Message::HostsLoaded(Ok(vec!["prod-db".into()])));
+        let host = tern_core::Host::new("prod-db", "db.example.com");
+        let _ = s.update(Message::HostsLoaded(Ok(HostsData {
+            hosts: vec![host],
+            ..HostsData::default()
+        })));
         let _ = s.update(Message::Dispatch(Action::OpenPalette));
         let _ = s.update(Message::PaletteQueryChanged("prod-db".into()));
         let _ = s.update(Message::Dispatch(Action::PaletteRun));

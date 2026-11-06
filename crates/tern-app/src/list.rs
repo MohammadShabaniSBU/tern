@@ -4,7 +4,7 @@
 //! collapse/expand are unit-tested. Items are a flat, display-ordered tree: a group is followed by
 //! its children, which have a greater `depth`.
 
-use iced::widget::{column, container, scrollable, space, text};
+use iced::widget::{column, container, row, scrollable, space, text};
 use iced::{Border, Center, Color, Element, Fill, Theme};
 
 use crate::app::Message;
@@ -22,6 +22,10 @@ pub struct Item {
     pub depth: u8,
     /// `Some(expanded)` for groups, `None` for leaves.
     pub group: Option<bool>,
+    /// Stable identity of the backing record (a UUID string); `None` for dummy data.
+    pub id: Option<String>,
+    /// Dimmed secondary text shown right-aligned in the row.
+    pub meta: String,
 }
 
 impl Item {
@@ -30,15 +34,26 @@ impl Item {
             label: label.into(),
             depth,
             group: None,
+            id: None,
+            meta: String::new(),
         }
     }
 
     pub fn group(label: impl Into<String>, depth: u8, expanded: bool) -> Self {
         Self {
-            label: label.into(),
-            depth,
             group: Some(expanded),
+            ..Self::leaf(label, depth)
         }
+    }
+
+    pub fn with_id(mut self, id: impl Into<String>) -> Self {
+        self.id = Some(id.into());
+        self
+    }
+
+    pub fn with_meta(mut self, meta: impl Into<String>) -> Self {
+        self.meta = meta.into();
+        self
     }
 }
 
@@ -164,6 +179,29 @@ impl ListState {
         self.items.drain(self.selected..end);
         self.refresh();
         Some(label)
+    }
+
+    /// Replace the items after a reload, keeping expanded/collapsed groups (matched by id, else
+    /// label) and the selection (matched by id) where they still exist.
+    pub fn replace_items(&mut self, mut items: Vec<Item>) {
+        let key = |i: &Item| i.id.clone().unwrap_or_else(|| i.label.clone());
+        let collapsed: std::collections::HashSet<String> = self
+            .items
+            .iter()
+            .filter(|i| i.group == Some(false))
+            .map(key)
+            .collect();
+        for item in items.iter_mut().filter(|i| i.group.is_some()) {
+            if collapsed.contains(&key(item)) {
+                item.group = Some(false);
+            }
+        }
+        let selected = self.selected_item().map(key);
+        self.items = items;
+        self.selected = selected
+            .and_then(|k| self.items.iter().position(|i| key(i) == k))
+            .unwrap_or(0);
+        self.refresh();
     }
 
     pub fn set_filter(&mut self, filter: String) {
@@ -310,8 +348,14 @@ pub fn view(list: &ListState, focused: bool) -> Element<'_, Message> {
             item.label
         );
         let is_selected = selected == Some(row);
+        let line = row![
+            text(label).size(14),
+            space().width(Fill),
+            text(item.meta.as_str()).size(12).style(text::secondary),
+        ]
+        .align_y(Center);
         col = col.push(
-            container(text(label).size(14))
+            container(line)
                 .width(Fill)
                 .height(ROW_H)
                 .padding([0, 8])

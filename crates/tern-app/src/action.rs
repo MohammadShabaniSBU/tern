@@ -150,6 +150,7 @@ actions! {
     PageUp       => "list.page_up",   "Page up",               List, ["pageup"], N;
     Collapse     => "list.collapse",  "Collapse group / focus sidebar", List, ["h", "left"], N;
     Expand       => "list.expand",    "Expand group / focus list", List, ["l", "right"], N;
+    SortToggle   => "list.sort",      "Toggle host sort (label / last connected)", List, ["s"], N;
     Filter       => "list.filter",    "Filter list",           List, ["/"], N;
     Open         => "item.open",      "Open / connect selected", List, ["enter"], N;
     Add          => "item.add",       "Add new item",          List, ["a"], N;
