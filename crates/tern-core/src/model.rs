@@ -176,6 +176,21 @@ impl Tunnel {
             (kind, _, _) => Err(ValidationError::MissingTarget(kind.as_str())),
         }
     }
+
+    /// A warning to show (not an error) when the listener is reachable from other machines.
+    /// Remote tunnels bind on the server, so this only applies to local and dynamic ones.
+    pub fn bind_warning(&self) -> Option<&'static str> {
+        if self.kind == TunnelKind::Remote {
+            return None;
+        }
+        let a = self.bind_addr.trim();
+        let loopback = a.eq_ignore_ascii_case("localhost")
+            || a == "::1"
+            || a == "[::1]"
+            || a.starts_with("127.");
+        (!loopback)
+            .then_some("Binding to a non-loopback address exposes this tunnel to the network")
+    }
 }
 
 #[cfg(test)]
@@ -194,6 +209,16 @@ mod tests {
             target_port: target.map(|(_, p)| p),
             auto_start: false,
         }
+    }
+
+    #[test]
+    fn bind_warning_flags_non_loopback_local_binds() {
+        let mut t = tunnel(TunnelKind::Local, Some(("db", 5432)));
+        assert!(t.bind_warning().is_none());
+        t.bind_addr = "0.0.0.0".into();
+        assert!(t.bind_warning().is_some());
+        t.kind = TunnelKind::Remote;
+        assert!(t.bind_warning().is_none());
     }
 
     #[test]

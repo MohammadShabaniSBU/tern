@@ -23,6 +23,8 @@ use crate::reauth::{self, Gate, ReauthPrompt, SensitiveOp};
 use crate::sessions::{self, AppKnownHosts, ConnTarget, Phase, SessionId, SessionView, Spawned};
 use crate::term_settings::{self, TermSettings};
 use crate::toast::{ToastKind, Toasts};
+use crate::tunnel_form::{self, TField, TunnelForm};
+use crate::tunnels_view::TunnelsData;
 use tern_term::widget::TermEvent;
 use tern_term::{Motion, SelectKind};
 
@@ -122,6 +124,8 @@ pub struct State {
     key_form: Option<KeyForm>,
     ids_data: IdentitiesData,
     identity_form: Option<IdentityForm>,
+    tunnels_data: TunnelsData,
+    tunnel_form: Option<TunnelForm>,
     /// Incremented per password copy so only the latest copy's timer clears the clipboard.
     clip_token: u64,
     gate: Gate,
@@ -191,6 +195,13 @@ pub enum Message {
     FormSave,
     HostSaved(Result<String, String>),
     KeysLoaded(Result<KeysData, String>),
+    TunnelsLoaded(Result<Vec<tern_core::Tunnel>, String>),
+    TunnelEdit(TField, String),
+    TunnelHost(Choice),
+    TunnelKind(Choice),
+    TunnelAuto(bool),
+    TunnelSave,
+    TunnelSaved(Result<String, String>),
     KeyPathChanged(String),
     KeyLabelChanged(String),
     KeyPassphraseChanged(Sensitive),
@@ -266,6 +277,8 @@ impl State {
             host_sort: HostSort::default(),
             host_form: None,
             keys_data: KeysData::default(),
+            tunnels_data: TunnelsData::default(),
+            tunnel_form: None,
             key_form: None,
             ids_data: IdentitiesData::default(),
             identity_form: None,
@@ -351,6 +364,8 @@ impl State {
                 self.host_data = result.unwrap_or_default();
                 self.hosts = self.host_data.host_refs();
                 self.rebuild_hosts_list();
+                self.tunnels_data.hosts = self.host_data.hosts.clone();
+                self.rebuild_tunnels_list();
                 Task::none()
             }
             Message::SpinnerTick => {
@@ -517,6 +532,34 @@ impl State {
                 self.toast(ToastKind::Error, "Could not read the password");
                 Task::none()
             }
+            Message::TunnelsLoaded(r) => {
+                if let Err(e) = &r {
+                    tracing::error!(error = %e, "could not load tunnels");
+                    self.toast(ToastKind::Error, "Could not load tunnels");
+                }
+                self.tunnels_data.tunnels = r.unwrap_or_default();
+                self.rebuild_tunnels_list();
+                Task::none()
+            }
+            Message::TunnelEdit(field, value) => self.edit_tunnel_form(|f| f.set(field, value)),
+            Message::TunnelHost(c) => self.edit_tunnel_form(|f| f.pick_host(c)),
+            Message::TunnelKind(c) => self.edit_tunnel_form(|f| f.pick_kind(c)),
+            Message::TunnelAuto(on) => self.edit_tunnel_form(|f| f.set_auto_start(on)),
+            Message::TunnelSave => self.save_tunnel_form(),
+            Message::TunnelSaved(Ok(label)) => {
+                self.tunnel_form = None;
+                self.mode = Mode::Normal;
+                self.toast(ToastKind::Success, format!("Saved '{label}'"));
+                self.reload_tunnels()
+            }
+            Message::TunnelSaved(Err(e)) => {
+                if let Some(form) = &mut self.tunnel_form {
+                    form.error = Some(format!("Could not save: {e}"));
+                } else {
+                    self.toast(ToastKind::Error, format!("Could not save: {e}"));
+                }
+                Task::none()
+            }
             Message::KeysLoaded(r) => {
                 if let Err(e) = &r {
                     tracing::error!(error = %e, "could not load keys");
@@ -636,6 +679,7 @@ impl State {
                     self.reload_hosts(),
                     self.reload_keys(),
                     self.reload_identities(),
+                    self.reload_tunnels(),
                 ])
             }
             Message::ItemDeleted(Err(e)) => {
@@ -653,6 +697,8 @@ impl State {
                 self.hosts.clear();
                 self.host_data = HostsData::default();
                 self.host_form = None;
+                self.tunnel_form = None;
+                self.tunnels_data = TunnelsData::default();
                 self.prompt = None;
                 self.key_form = None;
                 self.identity_form = None;
@@ -938,7 +984,11 @@ impl State {
             Action::FormReveal | Action::FormGenerate | Action::FormCopy => {
                 self.identity_password_action(action)
             }
+            Action::Add | Action::Edit if self.section == Section::Tunnels => {
+                self.open_tunnel_form(action == Action::Edit)
+            }
             Action::Add | Action::Edit => self.open_host_form(action == Action::Edit),
+            Action::FormSave if self.tunnel_form.is_some() => self.save_tunnel_form(),
             Action::FormSave if self.key_form.is_some() => self.submit_key_form(),
             Action::FormSave if self.identity_form.is_some() => self.save_identity_form(),
             Action::FormSave => self.save_host_form(),
@@ -1247,6 +1297,13 @@ impl State {
             return self.leave_insert();
         }
         if self.revealed.take().is_some() {
+            return Task::none();
+        }
+        if let Some(form) = &mut self.tunnel_form {
+            if form.request_close() {
+                self.tunnel_form = None;
+                return self.leave_insert();
+            }
             return Task::none();
         }
         if self.identity_form.take().is_some() {
@@ -2010,7 +2067,7 @@ impl State {
             Pending::DeleteSelected => {
                 let real = matches!(
                     self.section,
-                    Section::Hosts | Section::Keys | Section::Identities
+                    Section::Hosts | Section::Keys | Section::Identities | Section::Tunnels
                 )
                 .then(|| self.list().selected_item())
                 .flatten()
@@ -2199,7 +2256,10 @@ impl State {
     }
 
     fn any_form_open(&self) -> bool {
-        self.host_form.is_some() || self.key_form.is_some() || self.identity_form.is_some()
+        self.host_form.is_some()
+            || self.tunnel_form.is_some()
+            || self.key_form.is_some()
+            || self.identity_form.is_some()
     }
 
     fn edit_identity_form(&mut self, f: impl FnOnce(&mut IdentityForm)) -> Task<Message> {
@@ -2361,6 +2421,78 @@ impl State {
         )
     }
 
+    fn rebuild_tunnels_list(&mut self) {
+        let items = self.tunnels_data.items();
+        self.lists[3].replace_items(items);
+    }
+
+    fn reload_tunnels(&self) -> Task<Message> {
+        let store = self.store.clone();
+        Task::perform(async move { store.list_tunnels().await }, |r| {
+            Message::TunnelsLoaded(r.map_err(|e| e.to_string()))
+        })
+    }
+
+    fn edit_tunnel_form(&mut self, f: impl FnOnce(&mut TunnelForm)) -> Task<Message> {
+        if let Some(form) = &mut self.tunnel_form {
+            f(form);
+        }
+        Task::none()
+    }
+
+    fn open_tunnel_form(&mut self, edit: bool) -> Task<Message> {
+        if self.host_data.hosts.is_empty() {
+            self.toast(ToastKind::Info, "Add a host before creating tunnels");
+            return Task::none();
+        }
+        let existing = if edit {
+            let found = self
+                .list()
+                .selected_item()
+                .and_then(|i| i.id.as_deref())
+                .and_then(|id| self.tunnels_data.tunnel(id))
+                .cloned();
+            if found.is_none() {
+                self.toast(ToastKind::Info, "Select a tunnel to edit");
+                return Task::none();
+            }
+            found
+        } else {
+            None
+        };
+        self.tunnel_form = Some(TunnelForm::new(&self.host_data.hosts, existing.as_ref()));
+        self.mode = Mode::Insert;
+        self.matcher.reset();
+        iced::widget::operation::focus(tunnel_form::FIRST_ID)
+    }
+
+    fn save_tunnel_form(&mut self) -> Task<Message> {
+        let Some(form) = &mut self.tunnel_form else {
+            return Task::none();
+        };
+        let tunnel = match form.build() {
+            Ok(t) => t,
+            Err(e) => {
+                form.error = Some(e);
+                return Task::none();
+            }
+        };
+        let is_edit = form.is_edit();
+        let store = self.store.clone();
+        Task::perform(
+            async move {
+                let label = tunnel.label.clone();
+                let r = if is_edit {
+                    store.update_tunnel(tunnel).await
+                } else {
+                    store.insert_tunnel(tunnel).await
+                };
+                r.map(|()| label).map_err(|e| e.to_string())
+            },
+            Message::TunnelSaved,
+        )
+    }
+
     fn open_host_form(&mut self, edit: bool) -> Task<Message> {
         if self.section != Section::Hosts {
             self.toast(ToastKind::Info, "Not available for this section yet");
@@ -2429,10 +2561,14 @@ impl State {
         let store = self.store.clone();
         let is_key = self.section == Section::Keys;
         let is_identity = self.section == Section::Identities;
+        let is_tunnel = self.section == Section::Tunnels;
         let id = id.to_owned();
         Task::perform(
             async move {
-                if is_identity {
+                if is_tunnel {
+                    let tid = id.parse().map_err(|e| format!("{e}"))?;
+                    store.delete_tunnel(tid).await.map_err(|e| e.to_string())?;
+                } else if is_identity {
                     let iid = id.parse().map_err(|e| format!("{e}"))?;
                     store
                         .delete_identity(iid)
@@ -2602,7 +2738,13 @@ impl State {
                 |r| Message::SettingsLoaded(r.map_err(|e| e.to_string())),
             )
         };
-        Task::batch([hosts, keymap, self.reload_keys(), self.reload_identities()])
+        Task::batch([
+            hosts,
+            keymap,
+            self.reload_keys(),
+            self.reload_identities(),
+            self.reload_tunnels(),
+        ])
     }
 
     pub fn view(&self) -> Element<'_, Message> {
@@ -2691,6 +2833,11 @@ impl State {
                     Some(t)
                 })
                 .unwrap_or_else(|| item.label.clone()),
+            Some(item) if self.section == Section::Tunnels && item.id.is_some() => item
+                .id
+                .as_deref()
+                .and_then(|id| self.tunnels_data.detail(id))
+                .unwrap_or_else(|| item.label.clone()),
             Some(item) => format!(
                 "{}\n\n(details arrive with the {} screen, Sprint 3)",
                 item.label,
@@ -2746,6 +2893,9 @@ impl State {
         };
         if let Some(form) = &self.host_form {
             return iced::widget::stack![base, host_form::view(form)].into();
+        }
+        if let Some(form) = &self.tunnel_form {
+            return iced::widget::stack![base, tunnel_form::view(form)].into();
         }
         if let Some(p) = &self.prompt {
             return iced::widget::stack![base, prompt::view(p)].into();

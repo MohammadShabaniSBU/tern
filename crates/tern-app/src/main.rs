@@ -18,6 +18,8 @@ mod reauth;
 mod sessions;
 mod term_settings;
 mod toast;
+mod tunnel_form;
+mod tunnels_view;
 
 use app::State;
 

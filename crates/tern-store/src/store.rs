@@ -13,7 +13,9 @@ use std::sync::mpsc;
 
 use rusqlite::Connection;
 use secrecy::SecretString;
-use tern_core::{Group, GroupId, Host, HostId, Identity, IdentityId, KeyId, SshKeyMeta};
+use tern_core::{
+    Group, GroupId, Host, HostId, Identity, IdentityId, KeyId, SshKeyMeta, Tunnel, TunnelId,
+};
 use tern_vault::{KdfParams, Vault};
 use tokio::sync::oneshot;
 
@@ -225,6 +227,24 @@ impl Store {
 
     pub async fn delete_host(&self, id: HostId) -> Result<bool> {
         self.query(move |db| db.hosts().delete(id)).await
+    }
+
+    // ---------- tunnels ----------
+
+    pub async fn list_tunnels(&self) -> Result<Vec<Tunnel>> {
+        self.query(|db| db.tunnels().list()).await
+    }
+
+    pub async fn insert_tunnel(&self, tunnel: Tunnel) -> Result<()> {
+        self.query(move |db| db.tunnels().insert(&tunnel)).await
+    }
+
+    pub async fn update_tunnel(&self, tunnel: Tunnel) -> Result<()> {
+        self.query(move |db| db.tunnels().update(&tunnel)).await
+    }
+
+    pub async fn delete_tunnel(&self, id: TunnelId) -> Result<bool> {
+        self.query(move |db| db.tunnels().delete(id)).await
     }
 
     // ---------- identities ----------
