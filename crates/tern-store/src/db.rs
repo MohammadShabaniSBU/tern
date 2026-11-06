@@ -34,7 +34,8 @@ pub fn open_in_memory() -> Result<Connection> {
 }
 
 /// `PRAGMA integrity_check` (slow on big files, so debug builds only).
-pub fn integrity_check(conn: &Connection) -> Result<()> {
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
+fn integrity_check(conn: &Connection) -> Result<()> {
     let mut stmt = conn.prepare("PRAGMA integrity_check")?;
     let rows: Vec<String> = stmt
         .query_map([], |r| r.get(0))?

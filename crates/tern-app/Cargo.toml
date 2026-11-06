@@ -6,6 +6,24 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[[bin]]
+name = "tern"
+path = "src/main.rs"
+
+[package.metadata.deb]
+name = "tern"
+maintainer = "Mohammad <mohamad.darghah@gmail.com>"
+section = "net"
+priority = "optional"
+depends = "$auto, libxkbcommon0, libwayland-client0 | libx11-6, libvulkan1 | libgl1"
+extended-description = "Local-first, keyboard-first SSH client with encrypted host vault, tunnels and jump hosts."
+assets = [
+    ["target/release/tern", "usr/bin/", "755"],
+    ["../../packaging/tern.desktop", "usr/share/applications/", "644"],
+    ["../../packaging/tern.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
+    ["../../README.md", "usr/share/doc/tern/README", "644"],
+]
+
 [lints]
 workspace = true
 

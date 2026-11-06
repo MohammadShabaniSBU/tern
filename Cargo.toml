@@ -39,6 +39,10 @@ tern-ssh = { path = "crates/tern-ssh" }
 tern-term = { path = "crates/tern-term" }
 tern-io = { path = "crates/tern-io" }
 
+[profile.release]
+lto = "thin"
+strip = true
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=tern
+GenericName=SSH client
+Comment=Local-first, keyboard-first SSH client
+Exec=tern
+Icon=tern
+Terminal=false
+Categories=Network;RemoteAccess;
+Keywords=ssh;terminal;tunnel;sftp;
+StartupWMClass=tern
