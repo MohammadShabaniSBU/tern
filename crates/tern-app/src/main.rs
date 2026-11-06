@@ -3,6 +3,7 @@ mod app;
 mod auth;
 mod autolock;
 mod cheatsheet;
+mod crash;
 mod host_form;
 mod hosts_view;
 mod identity_form;
@@ -30,9 +31,16 @@ use app::State;
 fn main() -> anyhow::Result<()> {
     let data_dir = paths::ensure_data_dir()?;
     let _log_guard = logging::init(&data_dir)?;
+    crash::install(data_dir.clone());
     tracing::info!(data_dir = %data_dir.display(), "tern starting");
 
-    let store = tern_store::Store::open(&data_dir.join("tern.db"))?;
+    let store = match tern_store::Store::open(&data_dir.join("tern.db")) {
+        Ok(store) => store,
+        Err(e) => {
+            tracing::error!(error = %e, "could not open the database");
+            anyhow::bail!("{}", e.user_message());
+        }
+    };
 
     iced::application(
         move || State::new(store.clone()),

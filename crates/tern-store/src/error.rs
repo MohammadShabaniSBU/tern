@@ -29,3 +29,60 @@ pub enum Error {
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
+
+impl Error {
+    /// A sentence for the user (no jargon, no secrets) about what to do next.
+    pub fn user_message(&self) -> String {
+        use rusqlite::ErrorCode;
+        match self {
+            Error::Sqlite(rusqlite::Error::SqliteFailure(e, _)) => match e.code {
+                ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked => {
+                    "The database is locked by another process. Is tern already running?".into()
+                }
+                ErrorCode::DatabaseCorrupt | ErrorCode::NotADatabase => {
+                    "The database file is damaged or is not a tern database. Restore it from a backup (.tern) or move it away to start fresh.".into()
+                }
+                ErrorCode::ReadOnly => "The database file is read-only.".into(),
+                ErrorCode::DiskFull => "The disk is full.".into(),
+                _ => self.to_string(),
+            },
+            Error::Corrupt(why) => format!("The database failed its integrity check: {why}"),
+            Error::Closed => "tern's storage thread stopped unexpectedly; restart tern.".into(),
+            other => other.to_string(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sqlite(code: rusqlite::ffi::ErrorCode) -> Error {
+        let ffi = rusqlite::ffi::Error {
+            code,
+            extended_code: 0,
+        };
+        Error::Sqlite(rusqlite::Error::SqliteFailure(ffi, None))
+    }
+
+    #[test]
+    fn common_failures_get_actionable_messages() {
+        use rusqlite::ffi::ErrorCode;
+        assert!(
+            sqlite(ErrorCode::DatabaseBusy)
+                .user_message()
+                .contains("already running")
+        );
+        assert!(
+            sqlite(ErrorCode::DatabaseCorrupt)
+                .user_message()
+                .contains("backup")
+        );
+        assert!(
+            sqlite(ErrorCode::NotADatabase)
+                .user_message()
+                .contains("backup")
+        );
+        assert!(Error::Locked.user_message().contains("locked"));
+    }
+}

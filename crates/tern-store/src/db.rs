@@ -19,6 +19,8 @@ pub fn open(path: &Path) -> Result<Connection> {
     let mut conn = Connection::open(path)?;
     configure(&conn, true)?;
     migrations().to_latest(&mut conn)?;
+    #[cfg(debug_assertions)]
+    integrity_check(&conn)?;
     tracing::debug!(path = %path.display(), "database ready");
     Ok(conn)
 }
@@ -29,6 +31,19 @@ pub fn open_in_memory() -> Result<Connection> {
     configure(&conn, false)?;
     migrations().to_latest(&mut conn)?;
     Ok(conn)
+}
+
+/// `PRAGMA integrity_check` (slow on big files, so debug builds only).
+pub fn integrity_check(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare("PRAGMA integrity_check")?;
+    let rows: Vec<String> = stmt
+        .query_map([], |r| r.get(0))?
+        .collect::<std::result::Result<_, _>>()?;
+    if rows.len() == 1 && rows[0] == "ok" {
+        Ok(())
+    } else {
+        Err(crate::Error::Corrupt(rows.join("; ")))
+    }
 }
 
 fn configure(conn: &Connection, wal: bool) -> Result<()> {
@@ -67,6 +82,27 @@ fn restrict_permissions(_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fresh_database_passes_the_integrity_check() {
+        let conn = open_in_memory().unwrap();
+        integrity_check(&conn).unwrap();
+    }
+
+    #[test]
+    fn opening_a_non_database_file_is_a_friendly_error() {
+        let dir = std::env::temp_dir().join(format!("tern-bad-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tern.db");
+        std::fs::write(
+            &path,
+            b"this is definitely not an sqlite database file, just text....",
+        )
+        .unwrap();
+        let err = open(&path).unwrap_err();
+        assert!(err.user_message().contains("backup"), "{err}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     fn table_names(conn: &Connection) -> Vec<String> {
         let mut stmt = conn

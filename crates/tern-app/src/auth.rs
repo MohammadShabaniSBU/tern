@@ -57,7 +57,7 @@ impl AuthFailure {
     pub fn from_store(error: &tern_store::Error) -> Self {
         match error {
             tern_store::Error::Vault(tern_vault::Error::WrongPassword) => Self::WrongPassword,
-            other => Self::Other(other.to_string()),
+            other => Self::Other(other.user_message()),
         }
     }
 
