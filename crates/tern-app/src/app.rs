@@ -33,6 +33,8 @@ pub enum Screen {
     Create,
     /// A vault exists: ask for the master password.
     Unlock,
+    /// One-time warning shown right after the vault is created.
+    Recovery,
     /// Unlocked.
     Main,
 }
@@ -58,6 +60,8 @@ pub enum Message {
     AuthDone(Result<(), AuthFailure>),
     HostsLoaded(Result<usize, String>),
     SpinnerTick,
+    /// Enter pressed anywhere; only meaningful on the recovery warning.
+    Acknowledge,
     FocusNext,
     FocusPrevious,
     TogglePalette,
@@ -116,7 +120,19 @@ impl State {
                 Screen::Create => self.submit_create(),
                 _ => Task::none(),
             },
-            Message::AuthDone(Ok(())) => self.enter_main(),
+            Message::AuthDone(Ok(())) => match self.screen {
+                // A freshly created vault shows the no-recovery warning exactly once.
+                Screen::Create => {
+                    self.form = AuthForm::default();
+                    self.screen = Screen::Recovery;
+                    Task::none()
+                }
+                _ => self.enter_main(),
+            },
+            Message::Acknowledge => match self.screen {
+                Screen::Recovery => self.enter_main(),
+                _ => Task::none(),
+            },
             Message::AuthDone(Err(failure)) => {
                 self.form.busy = false;
                 self.form.password.clear();
@@ -234,6 +250,7 @@ impl State {
             },
             Screen::Create => auth::create_view(&self.form),
             Screen::Unlock => auth::unlock_view(&self.form),
+            Screen::Recovery => auth::recovery_view(),
             Screen::Main => self.main_view(),
         }
     }
@@ -365,6 +382,35 @@ mod tests {
         // A second submit while busy is ignored.
         let _ = s.update(Message::SubmitConfirm);
         assert!(s.form.busy);
+    }
+
+    #[test]
+    fn creating_a_vault_shows_the_recovery_warning_once() {
+        let mut s = state();
+        s.screen = Screen::Create;
+        let _ = s.update(Message::AuthDone(Ok(())));
+        assert_eq!(s.screen, Screen::Recovery);
+
+        // Only Enter (Acknowledge) leaves it.
+        let _ = s.update(Message::TogglePalette);
+        assert_eq!(s.screen, Screen::Recovery);
+        let _ = s.update(Message::Acknowledge);
+        assert_eq!(s.screen, Screen::Main);
+
+        // Later unlocks go straight to the main screen.
+        s.screen = Screen::Unlock;
+        let _ = s.update(Message::AuthDone(Ok(())));
+        assert_eq!(s.screen, Screen::Main);
+    }
+
+    #[test]
+    fn acknowledge_is_ignored_elsewhere() {
+        for screen in [Screen::Create, Screen::Unlock, Screen::Main] {
+            let mut s = state();
+            s.screen = screen;
+            let _ = s.update(Message::Acknowledge);
+            assert_eq!(s.screen, screen);
+        }
     }
 
     #[test]

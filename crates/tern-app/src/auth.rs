@@ -215,6 +215,29 @@ pub fn create_view(form: &AuthForm) -> Element<'_, Message> {
     )
 }
 
+/// One-time warning after creating the vault. `Enter` acknowledges (see `keymap`).
+pub fn recovery_view<'a>() -> Element<'a, Message> {
+    card(
+        column![
+            text("Your vault is ready").size(24),
+            text("There is no password recovery.")
+                .style(text::danger)
+                .size(18),
+            text(
+                "Your master password is never stored and cannot be reset. If you forget it, \
+                 every saved password and key is permanently lost."
+            ),
+            text(
+                "Once you have added hosts, export an encrypted backup and keep it somewhere safe."
+            ),
+            button(text("I understand — Enter").align_x(Center).width(Fill))
+                .padding(8)
+                .on_press(Message::Acknowledge),
+        ]
+        .spacing(12),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use secrecy::ExposeSecret;

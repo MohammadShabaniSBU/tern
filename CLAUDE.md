@@ -7,9 +7,13 @@ Full plan lives in `docs/` — read `docs/README.md`, `docs/ARCHITECTURE.md`, `d
 
 ## Current status
 
-Working through **Sprint 0 only** (`docs/sprints/sprint-00-foundation.md`). Do not write code for later sprints.
-CI (S0-T03) was explicitly skipped by the user.
-Done: T01, T02, T04, T05, T06, T07, T08. App modules: `app.rs` (state/update/view), `keymap.rs` (global key subscription; future keymap engine plugs in here), `logging.rs`, `paths.rs`.
+Sprint 0 done (CI, S0-T03, skipped by the user). Sprint 1 (`docs/sprints/sprint-01-storage-and-vault.md`) implemented: S1-T01..T07. Do not write code for later sprints.
+- `tern-vault`: Argon2id KEK (128 MiB/8 passes, ~420 ms), XChaCha20-Poly1305 `seal/open`, `Vault` envelope (create/unlock/change_password/lock).
+- `tern-store`: migrations (`migrations/001_init.sql`), repos (secrets only via explicit `Vault` methods; AAD `"<table>:<column>:<row id>"`), `Store` = cloneable async handle over one worker thread that owns the Connection and the unlocked Vault.
+- `tern-app`: `app.rs` (Loading/Create/Unlock/Recovery/Main screens), `auth.rs` (forms, `Sensitive` password wrapper), `keymap.rs` (global key subscription; future keymap engine plugs in here), `logging.rs`, `paths.rs`.
+- Pinned `rusqlite` 0.40 because `rusqlite_migration` 2.6 requires it (0.41 exists).
+- Password text lives only in `Sensitive` (zeroized, redacted Debug); never put raw password `String`s in Messages/State.
+- Don't screenshot the whole desktop to check the UI (it captures other windows); crop to the tern window or ask the user.
 
 ## Crate layout (`crates/`)
 

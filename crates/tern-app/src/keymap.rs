@@ -18,6 +18,7 @@ pub fn message_for_key(key: &Key, modifiers: Modifiers) -> Option<Message> {
         Key::Character(c) if modifiers == Modifiers::CTRL && c.eq_ignore_ascii_case("k") => {
             Some(Message::TogglePalette)
         }
+        Key::Named(Named::Enter) if modifiers.is_empty() => Some(Message::Acknowledge),
         // Tab / Shift+Tab move between form fields (docs/KEYBINDINGS.md, "Forms").
         Key::Named(Named::Tab) if modifiers == Modifiers::SHIFT => Some(Message::FocusPrevious),
         Key::Named(Named::Tab) if modifiers.is_empty() => Some(Message::FocusNext),
@@ -67,6 +68,14 @@ mod tests {
             Some(Message::FocusPrevious)
         ));
         assert!(message_for_key(&tab, Modifiers::CTRL).is_none());
+    }
+
+    #[test]
+    fn enter_acknowledges() {
+        assert!(matches!(
+            message_for_key(&Key::Named(Named::Enter), Modifiers::empty()),
+            Some(Message::Acknowledge)
+        ));
     }
 
     #[test]
