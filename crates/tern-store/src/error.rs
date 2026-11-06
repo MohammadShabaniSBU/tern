@@ -11,6 +11,16 @@ pub enum Error {
     Vault(#[from] tern_vault::Error),
     #[error(transparent)]
     Validation(#[from] tern_core::ValidationError),
+    /// A secret operation was attempted while the vault is locked.
+    #[error("vault is locked")]
+    Locked,
+    #[error("no vault has been created yet")]
+    NoVault,
+    #[error("a vault already exists")]
+    VaultExists,
+    /// The store worker thread is gone (it panicked or the store was shut down).
+    #[error("store worker has stopped")]
+    Closed,
     #[error("{entity} not found")]
     NotFound { entity: &'static str },
     /// A stored value could not be interpreted (never includes the value itself).

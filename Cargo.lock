@@ -3314,6 +3314,7 @@ dependencies = [
  "tern-core",
  "tern-vault",
  "thiserror 2.0.21",
+ "tokio",
  "tracing",
 ]
 
