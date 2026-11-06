@@ -10,6 +10,12 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+rusqlite.workspace = true
+rusqlite_migration.workspace = true
+tracing.workspace = true
 thiserror.workspace = true
 tern-core.workspace = true
 tern-vault.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

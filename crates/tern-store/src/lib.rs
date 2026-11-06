@@ -1,10 +1,7 @@
-//! tern-store: stub (filled in by a later sprint).
+//! SQLite persistence for tern: connection setup, migrations and (later) repositories.
 
-/// Errors produced by `tern-store`. Variants are added as functionality lands.
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    #[error("{0}")]
-    Other(String),
-}
+mod db;
+mod error;
 
-pub type Result<T, E = Error> = std::result::Result<T, E>;
+pub use db::{open, open_in_memory};
+pub use error::{Error, Result};

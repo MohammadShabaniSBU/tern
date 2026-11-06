@@ -8,7 +8,7 @@
 | Async runtime | `tokio` | Shared with iced via its `tokio` feature. |
 | SSH | `russh` (incl. its key-handling module, formerly `russh-keys`) | Pure Rust, async, supports password/pubkey/keyboard-interactive auth and `direct-tcpip` / `tcpip-forward` channels needed for tunnels. |
 | Terminal emulation | `alacritty_terminal` | Battle-tested VT parser + grid. We render the grid ourselves in an iced `canvas`. (Alternative: the `vt100` crate — simpler, fewer features. `iced_term` is worth reading for reference.) |
-| Storage | `rusqlite` (feature `bundled`) + `rusqlite_migration` | Single file DB, no external SQLite needed. |
+| Storage | `rusqlite` (feature `bundled`) + `rusqlite_migration` | Single file DB, no external SQLite needed. `rusqlite_migration` 2.6 requires rusqlite 0.40, so pin 0.40 until it supports 0.41. |
 | KDF | `argon2` (Argon2id) | Derives the key-encryption key from the master password. |
 | Encryption | `chacha20poly1305` (XChaCha20-Poly1305) | AEAD for secret fields and export bundles. |
 | Secret hygiene | `zeroize`, `secrecy` | Wrap passwords / keys so they're wiped on drop and never `Debug`-printed. |
@@ -46,12 +46,11 @@ vault_meta (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   kdf_params TEXT NOT NULL,        -- JSON: { m_cost, t_cost, p_cost }
   kdf_salt BLOB NOT NULL,
-  wrapped_data_key BLOB NOT NULL,  -- data key encrypted with the KEK
-  wrap_nonce BLOB NOT NULL,
+  wrapped_data_key BLOB NOT NULL,  -- data key sealed with the KEK (nonce is embedded in the blob)
   created_at TEXT NOT NULL
 )
 
-groups (id TEXT PK, name TEXT, parent_id TEXT NULL, sort_order INT)
+groups (id TEXT PK, name TEXT, parent_id TEXT NULL REFERENCES groups(id) ON DELETE SET NULL, sort_order INT)
 
 ssh_keys (
   id TEXT PK, label TEXT, key_type TEXT, public_key TEXT, fingerprint TEXT,
