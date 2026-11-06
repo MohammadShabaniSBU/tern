@@ -94,9 +94,21 @@ impl Vault {
         new: &SecretString,
         meta: &VaultMeta,
     ) -> Result<VaultMeta> {
+        self.rewrap(old, new, meta.kdf_params, meta)
+    }
+
+    /// Re-wrap the data key under `new` with the given KDF cost (fresh salt). Used to change the
+    /// password, the Argon2 cost, or both; `old` is verified against `meta`.
+    pub fn rewrap(
+        &self,
+        old: &SecretString,
+        new: &SecretString,
+        params: KdfParams,
+        meta: &VaultMeta,
+    ) -> Result<VaultMeta> {
         require_password(new)?;
         unwrap_data_key(old, meta)?;
-        wrap(&self.data_key, new, meta.kdf_params)
+        wrap(&self.data_key, new, params)
     }
 
     /// Lock the vault, dropping (and zeroizing) the data key.
@@ -215,6 +227,22 @@ mod tests {
                 .as_slice(),
             b"secret"
         );
+    }
+
+    #[test]
+    fn rewrap_changes_the_kdf_cost_and_keeps_the_data_key() {
+        let (vault, meta) = create("pw");
+        let blob = vault.seal(b"s", b"a").unwrap();
+        let costly = KdfParams::new(16, 2, 1).unwrap();
+        let new_meta = vault.rewrap(&pw("pw"), &pw("pw"), costly, &meta).unwrap();
+        assert_eq!(new_meta.kdf_params, costly);
+        assert_ne!(new_meta.kdf_salt, meta.kdf_salt);
+        let again = Vault::unlock(&pw("pw"), &new_meta).unwrap();
+        assert_eq!(
+            again.open(&blob, b"a").unwrap().expose_secret().as_slice(),
+            b"s"
+        );
+        assert!(vault.rewrap(&pw("bad"), &pw("pw"), costly, &meta).is_err());
     }
 
     #[test]

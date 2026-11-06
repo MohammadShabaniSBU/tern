@@ -18,6 +18,7 @@ mod paths;
 mod prompt;
 mod reauth;
 mod sessions;
+mod settings;
 mod term_settings;
 mod toast;
 mod tunnel_form;

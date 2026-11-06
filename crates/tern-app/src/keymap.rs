@@ -115,6 +115,27 @@ impl Chord {
         Ok(Chord { mods, key })
     }
 
+    /// The text form of this chord, parseable by [`Chord::parse`] (`"ctrl+shift+t"`).
+    pub fn to_text(&self) -> String {
+        let mut out = String::new();
+        for (flag, name) in [
+            (Modifiers::CTRL, "ctrl"),
+            (Modifiers::ALT, "alt"),
+            (Modifiers::SHIFT, "shift"),
+            (Modifiers::LOGO, "super"),
+        ] {
+            if self.mods.contains(flag) {
+                out.push_str(name);
+                out.push('+');
+            }
+        }
+        match &self.key {
+            KeyId::Char(c) => out.push(*c),
+            KeyId::Named(n) => out.push_str(named_text(*n)),
+        }
+        out
+    }
+
     fn is_leader_like(&self, leader: &Chord) -> bool {
         self == leader
     }
@@ -158,6 +179,38 @@ fn parse_key(s: &str) -> Result<KeyId, ParseError> {
     match (chars.next(), chars.next()) {
         (Some(c), None) => Ok(KeyId::Char(c)),
         _ => Err(ParseError::UnknownKey(s.to_owned())),
+    }
+}
+
+fn named_text(n: Named) -> &'static str {
+    match n {
+        Named::Escape => "esc",
+        Named::Enter => "enter",
+        Named::Tab => "tab",
+        Named::Space => "space",
+        Named::Backspace => "backspace",
+        Named::Delete => "delete",
+        Named::ArrowUp => "up",
+        Named::ArrowDown => "down",
+        Named::ArrowLeft => "left",
+        Named::ArrowRight => "right",
+        Named::Home => "home",
+        Named::End => "end",
+        Named::PageUp => "pageup",
+        Named::PageDown => "pagedown",
+        Named::F1 => "f1",
+        Named::F2 => "f2",
+        Named::F3 => "f3",
+        Named::F4 => "f4",
+        Named::F5 => "f5",
+        Named::F6 => "f6",
+        Named::F7 => "f7",
+        Named::F8 => "f8",
+        Named::F9 => "f9",
+        Named::F10 => "f10",
+        Named::F11 => "f11",
+        Named::F12 => "f12",
+        _ => "?",
     }
 }
 
@@ -290,6 +343,25 @@ impl Keymap {
             }
         }
         self.bindings.push(new);
+    }
+
+    /// Actions whose bindings clash with a binding of `action` (as found while building).
+    pub fn conflicts_with(&self, action: Action) -> Vec<Action> {
+        let mut out: Vec<Action> = self
+            .conflicts
+            .iter()
+            .filter_map(|c| {
+                if c.first == action {
+                    Some(c.second)
+                } else if c.second == action {
+                    Some(c.first)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        out.dedup();
+        out
     }
 
     pub fn leader(&self) -> &Chord {
@@ -501,6 +573,33 @@ pub struct RawKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chord_text_round_trips() {
+        for t in [
+            "j",
+            "ctrl+shift+t",
+            "alt+left",
+            "ctrl+tab",
+            "f1",
+            "?",
+            "ctrl++",
+            "space",
+            "esc",
+            "shift+g",
+        ] {
+            let c = Chord::parse(t).unwrap();
+            assert_eq!(Chord::parse(&c.to_text()).unwrap(), c, "{t}");
+        }
+    }
+
+    #[test]
+    fn rebinding_onto_a_taken_key_reports_the_other_action() {
+        let json = r#"{"item.add": ["j"]}"#;
+        let km = Keymap::build(None, Some(json));
+        assert_eq!(km.conflicts_with(Action::Add), vec![Action::MoveDown]);
+        assert!(Keymap::defaults().conflicts_with(Action::Add).is_empty());
+    }
 
     const NORMAL: Context = Context {
         mode: ModeMask::NORMAL,

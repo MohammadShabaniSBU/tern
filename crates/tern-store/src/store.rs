@@ -207,6 +207,29 @@ impl Store {
         .await
     }
 
+    /// The Argon2 cost the vault is currently wrapped with.
+    pub async fn kdf_params(&self) -> Result<tern_vault::KdfParams> {
+        self.run(|db| Ok(db.vault_meta().get()?.ok_or(Error::NoVault)?.kdf_params))
+            .await
+    }
+
+    /// Verify `old`, then re-wrap the data key under `new` (the same password to keep it) with
+    /// `params` (`None` keeps the current cost). Stored secrets are not re-encrypted.
+    pub async fn change_security(
+        &self,
+        old: SecretString,
+        new: SecretString,
+        params: Option<tern_vault::KdfParams>,
+    ) -> Result<()> {
+        self.run(move |db| {
+            let meta = db.vault_meta().get()?.ok_or(Error::NoVault)?;
+            let params = params.unwrap_or(meta.kdf_params);
+            let new_meta = db.vault()?.rewrap(&old, &new, params, &meta)?;
+            db.vault_meta().update(&new_meta)
+        })
+        .await
+    }
+
     // ---------- hosts ----------
 
     pub async fn list_hosts(&self) -> Result<Vec<Host>> {

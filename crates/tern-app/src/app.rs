@@ -23,6 +23,7 @@ use crate::palette::{self, HostRef, Palette, Target};
 use crate::prompt::{self, Prompt, PromptKind, PromptOutcome};
 use crate::reauth::{self, Gate, ReauthPrompt, SensitiveOp};
 use crate::sessions::{self, AppKnownHosts, ConnTarget, Phase, SessionId, SessionView, Spawned};
+use crate::settings::{self, SettingsMsg, SettingsScreen};
 use crate::term_settings::{self, TermSettings};
 use crate::toast::{ToastKind, Toasts};
 use crate::tunnel_form::{self, TField, TunnelForm};
@@ -32,6 +33,7 @@ use tern_term::widget::TermEvent;
 use tern_term::{Motion, SelectKind};
 
 mod io_ops;
+mod settings_ops;
 
 /// Which part of the app owns the keyboard. See `docs/KEYBINDINGS.md`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -128,6 +130,10 @@ pub struct State {
     keys_data: KeysData,
     key_form: Option<KeyForm>,
     io_form: Option<IoForm>,
+    settings: Option<SettingsScreen>,
+    /// User keymap overrides (`action id -> keys`), mirrored from the `keymap` setting.
+    keymap_overrides: std::collections::BTreeMap<String, Vec<String>>,
+    leader_setting: Option<String>,
     ids_data: IdentitiesData,
     identity_form: Option<IdentityForm>,
     tunnels_data: TunnelsData,
@@ -198,6 +204,7 @@ pub enum Message {
     SettingSaved(Result<(), String>),
     /// Mouse click/scroll; only resets the idle timer.
     Activity,
+    Settings(SettingsMsg),
     AutoLockTick(std::time::SystemTime),
     Locked(Result<(), String>),
     ToastTick(Instant),
@@ -321,6 +328,9 @@ impl State {
             tunnels_loaded: false,
             key_form: None,
             io_form: None,
+            settings: None,
+            keymap_overrides: std::collections::BTreeMap::new(),
+            leader_setting: None,
             ids_data: IdentitiesData::default(),
             identity_form: None,
             clip_token: 0,
@@ -347,6 +357,7 @@ impl State {
         }
         match message {
             Message::Activity => Task::none(),
+            Message::Settings(m) => self.on_settings(m),
             Message::AutoLockTick(now) => {
                 if self.screen == Screen::Main && self.autolock.should_lock(now) {
                     tracing::info!("auto-lock: idle timeout");
@@ -433,6 +444,9 @@ impl State {
                 if self.screen != Screen::Main {
                     return Task::none();
                 }
+                if let Some(task) = self.settings_key(&chord) {
+                    return task;
+                }
                 let terminal = self.terminal_focused();
                 if terminal
                     && self.tab().is_some_and(|t| t.term.in_copy_mode())
@@ -457,7 +471,7 @@ impl State {
             }
             Message::SettingSaved(result) => {
                 if let Err(e) = result {
-                    tracing::warn!(error = %e, "could not save palette recents");
+                    tracing::warn!(error = %e, "could not save a setting");
                 }
                 Task::none()
             }
@@ -475,6 +489,12 @@ impl State {
                         self.palette.set_recent(recent);
                         // Stored as JSON text; anything but "light" keeps the dark default.
                         self.dark = loaded.theme.as_deref().map(str::trim) != Some("\"light\"");
+                        self.keymap_overrides = loaded
+                            .keymap
+                            .as_deref()
+                            .and_then(|j| serde_json::from_str(j).ok())
+                            .unwrap_or_default();
+                        self.leader_setting = loaded.leader.clone();
                         self.keymap =
                             Keymap::build(loaded.leader.as_deref(), loaded.keymap.as_deref());
                         self.gate.set_minutes_from_setting(loaded.reauth.as_deref());
@@ -798,6 +818,7 @@ impl State {
                 self.prompt = None;
                 self.key_form = None;
                 self.io_form = None;
+                self.settings = None;
                 self.identity_form = None;
                 self.reauth = None;
                 self.revealed = None;
@@ -1091,6 +1112,8 @@ impl State {
                 self.open_tunnel_form(action == Action::Edit)
             }
             Action::Add | Action::Edit => self.open_host_form(action == Action::Edit),
+            Action::Settings => self.open_settings(),
+            Action::FormSave if self.settings.is_some() => self.on_settings(SettingsMsg::Save),
             Action::FormSave if self.tunnel_form.is_some() => self.save_tunnel_form(),
             Action::FormSave if self.key_form.is_some() => self.submit_key_form(),
             Action::FormSave if self.io_form.is_some() => self.submit_io(),
@@ -1445,6 +1468,9 @@ impl State {
             self.io_form = None;
             return self.leave_insert();
         }
+        if self.settings.is_some() {
+            return self.settings_back();
+        }
         if self.key_form.as_ref().is_some_and(|f| !f.busy) {
             self.key_form = None;
             return self.leave_insert();
@@ -1635,6 +1661,7 @@ impl State {
         self.mode == Mode::Insert
             && self.modals.is_empty()
             && self.prompt.is_none()
+            && self.settings.is_none()
             && self
                 .tab()
                 .is_some_and(|t| matches!(t.phase, Phase::Connected) && t.search.is_none())
@@ -2410,6 +2437,7 @@ impl State {
             || self.tunnel_form.is_some()
             || self.key_form.is_some()
             || self.io_form.is_some()
+            || self.settings.is_some()
             || self.identity_form.is_some()
     }
 
@@ -3302,6 +3330,17 @@ impl State {
         if let Some(f) = &self.io_form {
             return iced::widget::stack![base, io_form::view(f)].into();
         }
+        if let Some(s) = &self.settings {
+            let ctx = settings::ViewCtx {
+                keymap: &self.keymap,
+                overrides: &self.keymap_overrides,
+                term: &self.term_settings,
+                data_dir: crate::paths::resolve_data_dir()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default(),
+            };
+            return iced::widget::stack![base, settings::view(s, &ctx)].into();
+        }
         if let Some(f) = &self.identity_form {
             return iced::widget::stack![base, identity_form::view(f)].into();
         }
@@ -3986,6 +4025,146 @@ mod tests {
 
     fn tab(id: u64) -> SessionView {
         SessionView::new(id, ConnTarget::Saved("h".into()), "h".into(), (80, 24), 100)
+    }
+
+    fn press(s: &mut State, chord: &str) {
+        let c = Chord::parse(chord).unwrap();
+        let raw = keymap::RawKey {
+            key: iced::keyboard::Key::Unidentified,
+            modifiers: iced::keyboard::Modifiers::empty(),
+            text: None,
+        };
+        let _ = s.update(Message::Key(c, raw));
+    }
+
+    fn settings_on_keybindings(action: Action) -> State {
+        let mut s = main_state();
+        let _ = s.dispatch(Action::Settings);
+        assert_eq!(s.mode, Mode::Insert);
+        press(&mut s, "ctrl+tab");
+        press(&mut s, "ctrl+tab");
+        let scr = s.settings.as_mut().unwrap();
+        assert_eq!(scr.tab, settings::Tab::Keybindings);
+        scr.selected = Action::ALL.iter().position(|a| *a == action).unwrap();
+        s
+    }
+
+    #[test]
+    fn settings_open_and_close_with_esc() {
+        let mut s = main_state();
+        let _ = s.dispatch(Action::Settings);
+        assert!(s.settings.is_some());
+        press(&mut s, "esc");
+        assert!(s.settings.is_none());
+        assert_eq!(s.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn rebinding_replaces_the_default_keys_and_reset_restores_them() {
+        let mut s = settings_on_keybindings(Action::GoKeys);
+        press(&mut s, "enter");
+        assert_eq!(
+            s.settings.as_ref().unwrap().capture,
+            settings::Capture::Waiting
+        );
+        press(&mut s, "ctrl+shift+k");
+        assert_eq!(s.keymap.keys_for(Action::GoKeys), ["ctrl+shift+k"]);
+        assert!(s.keymap_overrides.contains_key("nav.keys"));
+        press(&mut s, "r");
+        assert_eq!(s.keymap.keys_for(Action::GoKeys), ["2"]);
+        assert!(s.keymap_overrides.is_empty());
+    }
+
+    #[test]
+    fn rebinding_to_a_taken_key_asks_before_applying() {
+        let mut s = settings_on_keybindings(Action::GoKeys);
+        press(&mut s, "enter");
+        press(&mut s, "j");
+        match &s.settings.as_ref().unwrap().capture {
+            settings::Capture::Conflict { with, .. } => assert!(with.contains(&Action::MoveDown)),
+            other => panic!("expected a conflict, got {other:?}"),
+        }
+        assert_eq!(s.keymap.keys_for(Action::GoKeys), ["2"]);
+        // Esc cancels without changing anything.
+        press(&mut s, "esc");
+        assert_eq!(
+            s.settings.as_ref().unwrap().capture,
+            settings::Capture::Idle
+        );
+        assert_eq!(s.keymap.keys_for(Action::GoKeys), ["2"]);
+        // Enter applies anyway.
+        press(&mut s, "enter");
+        press(&mut s, "j");
+        press(&mut s, "enter");
+        assert_eq!(s.keymap.keys_for(Action::GoKeys), ["j"]);
+    }
+
+    #[test]
+    fn unbind_leaves_the_action_without_keys() {
+        let mut s = settings_on_keybindings(Action::GoKeys);
+        press(&mut s, "delete");
+        assert!(s.keymap.keys_for(Action::GoKeys).is_empty());
+        let _ = s.update(Message::Settings(SettingsMsg::KbResetAll));
+        assert_eq!(s.keymap.keys_for(Action::GoKeys), ["2"]);
+    }
+
+    #[test]
+    fn general_settings_validate_and_apply() {
+        let mut s = main_state();
+        let _ = s.dispatch(Action::Settings);
+        let _ = s.update(Message::Settings(SettingsMsg::Idle("abc".into())));
+        let _ = s.update(Message::Settings(SettingsMsg::Save));
+        assert!(s.settings.as_ref().unwrap().error.is_some());
+        let _ = s.update(Message::Settings(SettingsMsg::Idle("7".into())));
+        let _ = s.update(Message::Settings(SettingsMsg::Save));
+        assert_eq!(s.autolock.idle_minutes, 7);
+        let _ = s.update(Message::Settings(SettingsMsg::Keep(true)));
+        assert!(s.autolock.keep_sessions);
+    }
+
+    #[test]
+    fn security_form_validates_before_touching_the_vault() {
+        let mut s = main_state();
+        let _ = s.dispatch(Action::Settings);
+        let m = |m| Message::Settings(m);
+        let _ = s.update(m(SettingsMsg::Tab(settings::Tab::Security)));
+        let _ = s.update(m(SettingsMsg::Save));
+        assert!(s.settings.as_ref().unwrap().error.is_some());
+        let _ = s.update(m(SettingsMsg::Current(Sensitive::new("pw".into()))));
+        let _ = s.update(m(SettingsMsg::New(Sensitive::new("a".into()))));
+        let _ = s.update(m(SettingsMsg::Confirm(Sensitive::new("b".into()))));
+        let _ = s.update(m(SettingsMsg::Save));
+        let scr = s.settings.as_ref().unwrap();
+        assert!(scr.error.as_deref().unwrap().contains("match"));
+        assert!(!scr.busy);
+    }
+
+    #[tokio::test]
+    async fn changing_password_and_cost_end_to_end() {
+        let store = Store::open_in_memory().unwrap();
+        let kdf = KdfParams::new(8, 1, 1).unwrap();
+        let pw = |s: &str| secrecy::SecretString::from(s);
+        store
+            .create_vault_with_params(pw("old"), kdf)
+            .await
+            .unwrap();
+        let costly = KdfParams::new(16, 2, 1).unwrap();
+        store
+            .change_security(pw("old"), pw("new"), Some(costly))
+            .await
+            .unwrap();
+        assert_eq!(store.kdf_params().await.unwrap(), costly);
+        store.lock().await.unwrap();
+        assert!(store.unlock(pw("old")).await.is_err());
+        store.unlock(pw("new")).await.unwrap();
+        // A wrong current password changes nothing.
+        assert!(
+            store
+                .change_security(pw("bad"), pw("x"), None)
+                .await
+                .is_err()
+        );
+        assert_eq!(store.kdf_params().await.unwrap(), costly);
     }
 
     #[test]
