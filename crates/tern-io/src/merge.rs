@@ -190,7 +190,7 @@ fn classify<T: PartialEq>(incoming: &T, local: Option<&T>) -> Counts {
 
 /// Preview of what importing `incoming` would do against `local`.
 pub fn plan(incoming: &Payload, local: &Payload) -> Counts {
-    fn by<'a, T, K: std::hash::Hash + Eq>(v: &'a [T], f: impl Fn(&T) -> K) -> HashMap<K, &'a T> {
+    fn by<T, K: std::hash::Hash + Eq>(v: &[T], f: impl Fn(&T) -> K) -> HashMap<K, &T> {
         v.iter().map(|x| (f(x), x)).collect()
     }
     let mut c = Counts::default();
