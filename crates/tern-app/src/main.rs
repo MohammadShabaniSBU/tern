@@ -2,6 +2,7 @@ mod action;
 mod app;
 mod auth;
 mod cheatsheet;
+mod host_form;
 mod hosts_view;
 mod keymap;
 mod list;

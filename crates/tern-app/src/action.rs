@@ -158,6 +158,10 @@ actions! {
     Delete       => "item.delete",    "Delete selected",       List, ["d d"], N;
     Duplicate    => "item.duplicate", "Duplicate selected",    List, ["y"], N;
     ToggleTunnels => "item.tunnels",  "Start/stop host tunnels", List, ["t"], N;
+    // Forms
+    FormSave     => "form.save",      "Form: save",            General, ["ctrl+s"], ModeMask::INSERT;
+    FormNext     => "form.next",      "Form: next field",      General, ["tab"], ModeMask::INSERT;
+    FormPrev     => "form.prev",      "Form: previous field",  General, ["shift+tab"], ModeMask::INSERT;
     // Palette
     PaletteDown  => "palette.down",   "Palette: next result",  General, ["down", "ctrl+n"], ModeMask::PALETTE;
     PaletteUp    => "palette.up",     "Palette: previous result", General, ["up", "ctrl+p"], ModeMask::PALETTE;

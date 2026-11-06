@@ -9,6 +9,7 @@ use tern_store::Store;
 use crate::action::ModeMask;
 use crate::action::{Action, Section};
 use crate::auth::{self, AuthFailure, AuthForm, CONFIRM_ID, PASSWORD_ID, Sensitive, retry_delay};
+use crate::host_form::{self, Choice, Field, HostForm, Picker};
 use crate::hosts_view::{HostSort, HostsData};
 use crate::keymap::{self, Chord, Context, Keymap, Matcher, Outcome};
 use crate::list::{self, ListState};
@@ -107,6 +108,7 @@ pub struct State {
     hosts: Vec<String>,
     host_data: HostsData,
     host_sort: HostSort,
+    host_form: Option<HostForm>,
     palette: Palette,
 }
 
@@ -152,6 +154,11 @@ pub enum Message {
     FilterSubmitted,
     /// A host or group was deleted from the store (label), or the attempt failed.
     ItemDeleted(Result<String, String>),
+    FormEdit(Field, String),
+    FormPick(Picker, Choice),
+    /// Enter in a form field.
+    FormSave,
+    HostSaved(Result<String, String>),
 }
 
 impl State {
@@ -178,6 +185,7 @@ impl State {
             hosts: Vec::new(),
             host_data: HostsData::default(),
             host_sort: HostSort::default(),
+            host_form: None,
             palette: Palette::default(),
         };
         (state, check)
@@ -324,6 +332,31 @@ impl State {
                 Task::none()
             }
             Message::FilterSubmitted => self.leave_insert(),
+            Message::FormEdit(field, value) => {
+                if let Some(form) = &mut self.host_form {
+                    form.set(field, value);
+                }
+                Task::none()
+            }
+            Message::FormPick(picker, choice) => {
+                if let Some(form) = &mut self.host_form {
+                    form.pick(picker, choice);
+                }
+                Task::none()
+            }
+            Message::FormSave => self.save_host_form(),
+            Message::HostSaved(Ok(label)) => {
+                self.host_form = None;
+                self.mode = Mode::Normal;
+                self.toast(ToastKind::Success, format!("Saved '{label}'"));
+                self.reload_hosts()
+            }
+            Message::HostSaved(Err(e)) => {
+                if let Some(form) = &mut self.host_form {
+                    form.error = Some(format!("Could not save: {e}"));
+                }
+                Task::none()
+            }
             Message::ItemDeleted(Ok(label)) => {
                 self.toast(ToastKind::Success, format!("Deleted '{label}'"));
                 self.reload_hosts()
@@ -342,6 +375,7 @@ impl State {
                 self.mode = Mode::Normal;
                 self.hosts.clear();
                 self.host_data = HostsData::default();
+                self.host_form = None;
                 self.modals.clear();
                 iced::widget::operation::focus(PASSWORD_ID)
             }
@@ -374,6 +408,13 @@ impl State {
                     |r| Message::SettingSaved(r.map_err(|e| e.to_string())),
                 )
             }
+            Action::Add | Action::Edit => self.open_host_form(action == Action::Edit),
+            Action::FormSave => self.save_host_form(),
+            Action::FormNext if self.host_form.is_some() => iced::widget::operation::focus_next(),
+            Action::FormPrev if self.host_form.is_some() => {
+                iced::widget::operation::focus_previous()
+            }
+            Action::FormNext | Action::FormPrev => Task::none(),
             Action::SortToggle => {
                 if self.section == Section::Hosts {
                     self.host_sort = self.host_sort.toggled();
@@ -507,6 +548,13 @@ impl State {
 
     /// `Esc`: move one step outwards. Modal -> palette -> insert -> clear the filter.
     fn back(&mut self) -> Task<Message> {
+        if let Some(form) = &mut self.host_form {
+            if form.request_close() {
+                self.host_form = None;
+                return self.leave_insert();
+            }
+            return Task::none();
+        }
         match self.mode {
             Mode::Modal => {
                 self.modals.pop();
@@ -606,6 +654,70 @@ impl State {
         Task::perform(async move { load_hosts(&store).await }, |r| {
             Message::HostsLoaded(r.map_err(|e| e.to_string()))
         })
+    }
+
+    fn open_host_form(&mut self, edit: bool) -> Task<Message> {
+        if self.section != Section::Hosts {
+            self.toast(ToastKind::Info, "Not available for this section yet");
+            return Task::none();
+        }
+        let selected = self.list().selected_item().cloned();
+        let host = if edit {
+            let Some(item) = selected.as_ref().filter(|i| i.group.is_none()) else {
+                self.toast(ToastKind::Info, "Select a host to edit");
+                return Task::none();
+            };
+            let Some(host) = item.id.as_deref().and_then(|id| self.host_data.host(id)) else {
+                return Task::none();
+            };
+            Some(host.clone())
+        } else {
+            None
+        };
+        // New hosts start in the selected group (or the selected host's group).
+        let default_group = if host.is_none() {
+            selected.and_then(|i| match i.group {
+                Some(_) => i.id,
+                None => {
+                    i.id.as_deref()
+                        .and_then(|id| self.host_data.host(id))
+                        .and_then(|h| h.group_id.map(|g| g.to_string()))
+                }
+            })
+        } else {
+            None
+        };
+        self.host_form = Some(HostForm::new(&self.host_data, host.as_ref(), default_group));
+        self.mode = Mode::Insert;
+        self.matcher.reset();
+        iced::widget::operation::focus(Field::FIRST_ID)
+    }
+
+    fn save_host_form(&mut self) -> Task<Message> {
+        let Some(form) = &mut self.host_form else {
+            return Task::none();
+        };
+        let host = match form.build() {
+            Ok(h) => h,
+            Err(e) => {
+                form.error = Some(e);
+                return Task::none();
+            }
+        };
+        let is_edit = form.is_edit();
+        let store = self.store.clone();
+        Task::perform(
+            async move {
+                let label = host.label.clone();
+                let r = if is_edit {
+                    store.update_host(host).await
+                } else {
+                    store.insert_host(host).await
+                };
+                r.map(|()| label).map_err(|e| e.to_string())
+            },
+            Message::HostSaved,
+        )
     }
 
     fn delete_host_or_group(&mut self, id: &str, is_group: bool, label: String) -> Task<Message> {
@@ -870,6 +982,9 @@ impl State {
             .style(container::bordered_box);
 
         let base = column![row![sidebar, list_pane, detail].height(Fill), status_bar];
+        if let Some(form) = &self.host_form {
+            return iced::widget::stack![base, host_form::view(form)].into();
+        }
         match (self.modals.top(), self.mode) {
             (Some(m), _) => iced::widget::stack![base, modal::view(m, &self.keymap)].into(),
             (None, Mode::Palette) => {
