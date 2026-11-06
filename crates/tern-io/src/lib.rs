@@ -1,6 +1,7 @@
 //! tern-io: backup bundle, plaintext export, ssh_config import/export, key scanning.
 
 pub mod bundle;
+pub mod merge;
 
 pub use bundle::{Bundle, Payload, decrypt, encrypt};
 
@@ -17,6 +18,8 @@ pub enum Error {
     Invalid(String),
     #[error("{0}")]
     Other(String),
+    #[error("store: {0}")]
+    Store(#[from] tern_store::Error),
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;

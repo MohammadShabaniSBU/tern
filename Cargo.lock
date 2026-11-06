@@ -4437,6 +4437,7 @@ dependencies = [
  "tern-store",
  "tern-vault",
  "thiserror 2.0.21",
+ "tokio",
  "zeroize",
 ]
 
