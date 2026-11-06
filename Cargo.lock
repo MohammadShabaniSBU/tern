@@ -4366,6 +4366,7 @@ dependencies = [
 name = "tern-ssh"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "rand",
  "russh",
  "secrecy",
