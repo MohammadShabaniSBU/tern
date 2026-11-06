@@ -7,7 +7,9 @@ Full plan lives in `docs/` — read `docs/README.md`, `docs/ARCHITECTURE.md`, `d
 
 ## Current status
 
-Sprint 0–6 are done (S0-T03 CI was skipped by the user). Do not write code for later sprints until the user starts the next one (`docs/sprints/sprint-07-*.md`).
+Sprint 0–7 are done (S0-T03 CI was skipped by the user). Do not write code for later sprints until the user starts the next one (`docs/sprints/sprint-08-*.md`).
+
+Sprint 7 (import/export): `tern-io` has `bundle.rs` (encrypted `tern-backup` v1, spec in `docs/EXPORT_FORMAT.md`), `merge.rs` (`snapshot`/`plan`/`apply` — atomic, strategies skip/overwrite/keep-both), `plain.rs`, `ssh_config.rs` (parser with Include, mapper, writer), `keyscan.rs`. `tern-app`: `io_form.rs` (one dialog for all flows, selection by typed text like `1,3,5-7`) and `app/io_ops.rs` (the `State` logic). Actions `io.*` are palette-only; backup/plaintext export require master-password re-entry. Scheduled backups: settings `backup.dir|keep|enabled`; after unlock the app asks for the backup password (never stored) and writes `tern-backup-<stamp>.tern`. No `rfd`: paths are typed. Not hand-tested in the GUI yet.
 
 Sprint 6 (tunnels): `tern-ssh` has `pool.rs` (`ConnectionPool`, weak refs keyed by host id; terminals use `spawn_pooled`, tunnels `get_or_connect` headless — unknown host key or interactive auth makes the tunnel fail with "connect once from a terminal first"), `tunnel.rs` (-L/-R/-D over a `SharedConn`), `socks5.rs`, `manager.rs` (`TunnelCommand`/`TunnelEvent`, supervised with backoff; setting `tunnel.reconnect`=`false` disables retries). `tern-app`: `tunnels_view.rs`, `tunnel_form.rs`, `tunnel_run.rs` (status + subscription); lock sends `StopAll`; `auto_start` tunnels start after unlock. Live forwarding tests need a server with `AllowTcpForwarding yes` (the stock linuxserver image has it off: `docker exec <c> sed -i 's/^AllowTcpForwarding no/AllowTcpForwarding yes/' /config/sshd/sshd_config`, plus `MaxStartups 200:30:300` and `PerSourcePenalties no` to avoid flaky drops, then restart).
 

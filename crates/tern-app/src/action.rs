@@ -162,6 +162,13 @@ actions! {
     MoveToGroup  => "host.move",      "Move host to group",    List, ["m"], N;
     GenerateKey  => "key.generate",   "Generate a new SSH key", List, ["ctrl+n"], N;
     ImportKey    => "key.import",     "Import SSH key from file", List, ["i"], N;
+    ExportBackup => "io.export_backup", "Export encrypted backup… (asks master password)", Vault, [], G;
+    ImportBackup => "io.import_backup", "Import backup…", Vault, [], G;
+    ExportPlain  => "io.export_plain", "Export plaintext JSON… (asks master password)", Vault, [], G;
+    ImportSshConfig => "io.import_ssh_config", "Import hosts from ~/.ssh/config…", Vault, [], G;
+    ImportSshKeys => "io.import_ssh_keys", "Import keys from ~/.ssh…", Vault, [], G;
+    ExportSshConfig => "io.export_ssh_config", "Export hosts as ssh_config snippet…", Vault, [], G;
+    ScheduleBackups => "io.schedule_backups", "Scheduled backup settings…", Vault, [], G;
     PasteKey     => "key.paste",      "Add SSH key from clipboard", List, ["shift+p"], N;
     CopyPublicKey => "key.copy_public", "Copy public key",     List, ["shift+y"], N;
     ToggleMark   => "list.mark",      "Mark/unmark for bulk actions", List, ["space"], N;

@@ -12,6 +12,7 @@ use crate::auth::{self, AuthFailure, AuthForm, CONFIRM_ID, PASSWORD_ID, Sensitiv
 use crate::host_form::{self, Choice, Field, HostForm, Picker};
 use crate::hosts_view::{HostSort, HostsData};
 use crate::identity_form::{self, IdField, IdentitiesData, IdentityForm};
+use crate::io_form::{self, IoForm, IoKind, Preview};
 use crate::key_form::{self, KeyForm, KeyMode};
 use crate::keymap::{self, Chord, Context, Keymap, Matcher, Outcome};
 use crate::keys_view::KeysData;
@@ -28,6 +29,8 @@ use crate::tunnel_run::{self, TunState, TunStatus, TunnelMgr};
 use crate::tunnels_view::TunnelsData;
 use tern_term::widget::TermEvent;
 use tern_term::{Motion, SelectKind};
+
+mod io_ops;
 
 /// Which part of the app owns the keyboard. See `docs/KEYBINDINGS.md`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -123,6 +126,7 @@ pub struct State {
     host_form: Option<HostForm>,
     keys_data: KeysData,
     key_form: Option<KeyForm>,
+    io_form: Option<IoForm>,
     ids_data: IdentitiesData,
     identity_form: Option<IdentityForm>,
     tunnels_data: TunnelsData,
@@ -223,6 +227,16 @@ pub enum Message {
     KeyPublicChanged(String),
     KeySubmit,
     KeySaved(Result<String, String>),
+    IoPath(String),
+    IoScope(String),
+    IoPassword(Sensitive),
+    IoConfirm(Sensitive),
+    IoExtra(String),
+    IoSubmit,
+    IoPreviewed(Result<Preview, String>),
+    IoDone(Result<String, String>),
+    IoScheduleLoaded(String, bool, u32),
+    AutoBackupDue(bool),
     ClipboardRead(Option<String>),
     IdentitiesLoaded(Result<IdentitiesData, String>),
     IdentityEdit(IdField, String),
@@ -298,6 +312,7 @@ impl State {
             autostart_pending: false,
             tunnels_loaded: false,
             key_form: None,
+            io_form: None,
             ids_data: IdentitiesData::default(),
             identity_form: None,
             clip_token: 0,
@@ -650,6 +665,25 @@ impl State {
             Message::KeyPublicChanged(v) => self.edit_key_form(|f| f.public = v),
             Message::KeyKindPicked(k) => self.edit_key_form(|f| f.kind = k),
             Message::KeySubmit => self.submit_key_form(),
+            Message::IoPath(v) => self.edit_io(|f| f.path = v),
+            Message::IoScope(v) => self.edit_io(|f| f.scope = v),
+            Message::IoPassword(v) => self.edit_io(|f| f.password = v),
+            Message::IoConfirm(v) => self.edit_io(|f| f.confirm = v),
+            Message::IoExtra(v) => self.edit_io(|f| f.extra = v),
+            Message::IoSubmit => self.submit_io(),
+            Message::IoPreviewed(r) => self.io_previewed(r),
+            Message::IoDone(r) => self.io_done(r),
+            Message::IoScheduleLoaded(dir, on, keep) => self.edit_io(|f| {
+                if f.kind == IoKind::BackupSchedule && f.path.is_empty() && f.extra.is_empty() {
+                    f.path = dir;
+                    f.scope = if on { "on" } else { "off" }.into();
+                    f.extra = keep.to_string();
+                }
+            }),
+            Message::AutoBackupDue(true) if !self.any_form_open() => {
+                self.open_io(IoKind::AutoBackup)
+            }
+            Message::AutoBackupDue(_) => Task::none(),
             Message::KeySaved(Ok(label)) => {
                 self.key_form = None;
                 self.mode = Mode::Normal;
@@ -736,6 +770,7 @@ impl State {
                 self.autostart_pending = false;
                 self.prompt = None;
                 self.key_form = None;
+                self.io_form = None;
                 self.identity_form = None;
                 self.reauth = None;
                 self.revealed = None;
@@ -1025,6 +1060,16 @@ impl State {
             Action::Add | Action::Edit => self.open_host_form(action == Action::Edit),
             Action::FormSave if self.tunnel_form.is_some() => self.save_tunnel_form(),
             Action::FormSave if self.key_form.is_some() => self.submit_key_form(),
+            Action::FormSave if self.io_form.is_some() => self.submit_io(),
+            Action::ExportBackup => {
+                self.request_sensitive(SensitiveOp::OpenIo(IoKind::ExportBackup))
+            }
+            Action::ExportPlain => self.request_sensitive(SensitiveOp::OpenIo(IoKind::ExportPlain)),
+            Action::ImportBackup => self.open_io(IoKind::ImportBackup),
+            Action::ImportSshConfig => self.open_io(IoKind::ImportSshConfig),
+            Action::ImportSshKeys => self.open_io(IoKind::ImportSshKeys),
+            Action::ExportSshConfig => self.open_io(IoKind::ExportSshConfig),
+            Action::ScheduleBackups => self.open_io(IoKind::BackupSchedule),
             Action::FormSave if self.identity_form.is_some() => self.save_identity_form(),
             Action::FormSave => self.save_host_form(),
             Action::FormNext if self.any_form_open() => iced::widget::operation::focus_next(),
@@ -1346,6 +1391,18 @@ impl State {
             return Task::none();
         }
         if self.identity_form.take().is_some() {
+            return self.leave_insert();
+        }
+        if self.io_form.as_ref().is_some_and(|f| !f.busy) {
+            // From a preview, Esc goes back to the input stage; otherwise it closes the dialog.
+            if let Some(f) = &mut self.io_form
+                && f.preview.is_some()
+            {
+                f.preview = None;
+                f.extra.clear();
+                return Task::none();
+            }
+            self.io_form = None;
             return self.leave_insert();
         }
         if self.key_form.as_ref().is_some_and(|f| !f.busy) {
@@ -2289,6 +2346,7 @@ impl State {
                     Message::PasswordRevealed,
                 )
             }
+            SensitiveOp::OpenIo(kind) => self.open_io(kind),
             SensitiveOp::ExportKey(id) => {
                 let label = self
                     .keys_data
@@ -2304,6 +2362,7 @@ impl State {
         self.host_form.is_some()
             || self.tunnel_form.is_some()
             || self.key_form.is_some()
+            || self.io_form.is_some()
             || self.identity_form.is_some()
     }
 
@@ -2999,7 +3058,15 @@ impl State {
         } else {
             Task::none()
         };
+        let backup = {
+            let store = self.store.clone();
+            Task::perform(
+                async move { io_ops::auto_backup_due(&store).await },
+                Message::AutoBackupDue,
+            )
+        };
         Task::batch([
+            backup,
             mgr,
             hosts,
             keymap,
@@ -3171,6 +3238,9 @@ impl State {
         }
         if let Some(f) = &self.key_form {
             return iced::widget::stack![base, key_form::view(f)].into();
+        }
+        if let Some(f) = &self.io_form {
+            return iced::widget::stack![base, io_form::view(f)].into();
         }
         if let Some(f) = &self.identity_form {
             return iced::widget::stack![base, identity_form::view(f)].into();

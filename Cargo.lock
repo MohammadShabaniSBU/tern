@@ -4400,6 +4400,7 @@ dependencies = [
  "nucleo-matcher",
  "rand",
  "secrecy",
+ "serde",
  "serde_json",
  "tempfile",
  "tern-core",

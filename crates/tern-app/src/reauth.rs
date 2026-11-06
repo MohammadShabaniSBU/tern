@@ -58,6 +58,7 @@ impl Gate {
 pub enum SensitiveOp {
     RevealPassword(IdentityId),
     ExportKey(KeyId),
+    OpenIo(crate::io_form::IoKind),
 }
 
 #[derive(Debug, Clone)]
@@ -82,6 +83,7 @@ impl ReauthPrompt {
         match self.then {
             SensitiveOp::RevealPassword(_) => "reveal a stored password",
             SensitiveOp::ExportKey(_) => "export a private key",
+            SensitiveOp::OpenIo(_) => "export all your data",
         }
     }
 }
