@@ -9,6 +9,7 @@ Full plan lives in `docs/` — read `docs/README.md`, `docs/ARCHITECTURE.md`, `d
 
 Working through **Sprint 0 only** (`docs/sprints/sprint-00-foundation.md`). Do not write code for later sprints.
 CI (S0-T03) was explicitly skipped by the user.
+Done: T01, T02, T04, T05, T06, T07, T08. App modules: `app.rs` (state/update/view), `keymap.rs` (global key subscription; future keymap engine plugs in here), `logging.rs`, `paths.rs`.
 
 ## Crate layout (`crates/`)
 
