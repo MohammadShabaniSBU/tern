@@ -119,6 +119,29 @@ impl<'c> HostRepo<'c> {
         require_changed(n, "host")
     }
 
+    /// Move a host to a group (or to the top level with `None`).
+    pub fn set_group(&self, id: HostId, group: Option<tern_core::GroupId>) -> Result<()> {
+        let n = self.conn.execute(
+            &format!("UPDATE hosts SET group_id = ?2, updated_at = {NOW} WHERE id = ?1"),
+            params![id.to_string(), group.map(|g| g.to_string())],
+        )?;
+        require_changed(n, "host")
+    }
+
+    /// `last_connected_at` for every host that has connected at least once.
+    pub fn last_connected_all(&self) -> Result<std::collections::HashMap<HostId, String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, last_connected_at FROM hosts WHERE last_connected_at IS NOT NULL",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                parse_col::<HostId>(0, &r.get::<_, String>(0)?)?,
+                r.get::<_, String>(1)?,
+            ))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     pub fn last_connected_at(&self, id: HostId) -> Result<Option<String>> {
         Ok(self
             .conn

@@ -105,6 +105,18 @@ impl<'c> KeyRepo<'c> {
             > 0)
     }
 
+    /// `created_at` (UTC text) for every key.
+    pub fn created_all(&self) -> Result<std::collections::HashMap<KeyId, String>> {
+        let mut stmt = self.conn.prepare("SELECT id, created_at FROM ssh_keys")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                parse_col::<KeyId>(0, &r.get::<_, String>(0)?)?,
+                r.get::<_, String>(1)?,
+            ))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     pub fn get_private_key(&self, id: KeyId, vault: &Vault) -> Result<Option<SecretString>> {
         let blob: Option<Vec<u8>> = self
             .conn

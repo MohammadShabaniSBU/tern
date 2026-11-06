@@ -7,12 +7,13 @@
 //!
 //! The worker exits, dropping (and zeroizing) the vault, when the last handle is dropped.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::mpsc;
 
 use rusqlite::Connection;
 use secrecy::SecretString;
-use tern_core::{Host, HostId, Identity, IdentityId};
+use tern_core::{Group, GroupId, Host, HostId, Identity, IdentityId, KeyId, SshKeyMeta};
 use tern_vault::{KdfParams, Vault};
 use tokio::sync::oneshot;
 
@@ -244,6 +245,102 @@ impl Store {
     pub async fn delete_identity(&self, id: IdentityId) -> Result<bool> {
         self.query(move |db| db.identities().delete(id)).await
     }
+
+    /// Update non-secret fields; `password` is `Some(change)` to set (`Some(Some)`) or clear
+    /// (`Some(None)`) the stored password, `None` to leave it as is.
+    pub async fn update_identity(
+        &self,
+        identity: Identity,
+        password: Option<Option<SecretString>>,
+    ) -> Result<()> {
+        self.query(move |db| {
+            db.identities().update(&identity)?;
+            if let Some(pw) = password {
+                db.identities()
+                    .set_password(identity.id, pw.as_ref(), db.vault()?)?;
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn identity_has_password(&self, id: IdentityId) -> Result<bool> {
+        self.query(move |db| db.identities().has_password(id)).await
+    }
+
+    // ---------- host extras ----------
+
+    pub async fn set_host_group(&self, id: HostId, group: Option<GroupId>) -> Result<()> {
+        self.query(move |db| db.hosts().set_group(id, group)).await
+    }
+
+    pub async fn touch_last_connected(&self, id: HostId) -> Result<()> {
+        self.query(move |db| db.hosts().touch_last_connected(id))
+            .await
+    }
+
+    pub async fn host_last_connected(&self) -> Result<HashMap<HostId, String>> {
+        self.query(|db| db.hosts().last_connected_all()).await
+    }
+
+    // ---------- groups ----------
+
+    pub async fn list_groups(&self) -> Result<Vec<Group>> {
+        self.query(|db| db.groups().list()).await
+    }
+
+    pub async fn insert_group(&self, group: Group) -> Result<()> {
+        self.query(move |db| db.groups().insert(&group)).await
+    }
+
+    pub async fn update_group(&self, group: Group) -> Result<()> {
+        self.query(move |db| db.groups().update(&group)).await
+    }
+
+    pub async fn delete_group(&self, id: GroupId) -> Result<bool> {
+        self.query(move |db| db.groups().delete(id)).await
+    }
+
+    // ---------- keys ----------
+
+    pub async fn list_keys(&self) -> Result<Vec<SshKeyMeta>> {
+        self.query(|db| db.keys().list()).await
+    }
+
+    pub async fn key_created_at(&self) -> Result<HashMap<KeyId, String>> {
+        self.query(|db| db.keys().created_all()).await
+    }
+
+    pub async fn insert_key(
+        &self,
+        meta: SshKeyMeta,
+        private_key: SecretString,
+        passphrase: Option<SecretString>,
+    ) -> Result<()> {
+        self.query(move |db| {
+            db.keys()
+                .insert(&meta, &private_key, passphrase.as_ref(), db.vault()?)
+        })
+        .await
+    }
+
+    pub async fn update_key(&self, meta: SshKeyMeta) -> Result<()> {
+        self.query(move |db| db.keys().update(&meta)).await
+    }
+
+    pub async fn delete_key(&self, id: KeyId) -> Result<bool> {
+        self.query(move |db| db.keys().delete(id)).await
+    }
+
+    pub async fn get_key_private(&self, id: KeyId) -> Result<Option<SecretString>> {
+        self.query(move |db| db.keys().get_private_key(id, db.vault()?))
+            .await
+    }
+
+    pub async fn get_key_passphrase(&self, id: KeyId) -> Result<Option<SecretString>> {
+        self.query(move |db| db.keys().get_passphrase(id, db.vault()?))
+            .await
+    }
 }
 
 #[cfg(test)]
@@ -269,6 +366,89 @@ mod tests {
         assert_eq!(store.list_hosts().await.unwrap(), vec![host.clone()]);
         assert_eq!(store.get_host(host.id).await.unwrap(), Some(host.clone()));
         assert!(store.delete_host(host.id).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn groups_move_hosts_and_delete_ungroups_them() {
+        let store = Store::open_in_memory().unwrap();
+        let group = Group {
+            id: GroupId::new(),
+            name: "Work".into(),
+            parent_id: None,
+            sort_order: 0,
+        };
+        store.insert_group(group.clone()).await.unwrap();
+        let host = Host::new("web", "web.example.com");
+        store.insert_host(host.clone()).await.unwrap();
+        store.set_host_group(host.id, Some(group.id)).await.unwrap();
+        assert_eq!(
+            store.get_host(host.id).await.unwrap().unwrap().group_id,
+            Some(group.id)
+        );
+        assert!(store.host_last_connected().await.unwrap().is_empty());
+        store.touch_last_connected(host.id).await.unwrap();
+        assert!(
+            store
+                .host_last_connected()
+                .await
+                .unwrap()
+                .contains_key(&host.id)
+        );
+        assert!(store.delete_group(group.id).await.unwrap());
+        assert_eq!(
+            store.get_host(host.id).await.unwrap().unwrap().group_id,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn keys_and_identity_updates_round_trip() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .create_vault_with_params(pw("master"), fast())
+            .await
+            .unwrap();
+        let meta = SshKeyMeta {
+            id: KeyId::new(),
+            label: "k".into(),
+            key_type: "ssh-ed25519".into(),
+            public_key: "ssh-ed25519 AAAA".into(),
+            fingerprint: "SHA256:x".into(),
+        };
+        store
+            .insert_key(meta.clone(), pw("PRIVATE"), Some(pw("pass")))
+            .await
+            .unwrap();
+        assert_eq!(store.list_keys().await.unwrap(), vec![meta.clone()]);
+        assert!(store.key_created_at().await.unwrap().contains_key(&meta.id));
+        let private = store.get_key_private(meta.id).await.unwrap().unwrap();
+        assert_eq!(private.expose_secret(), "PRIVATE");
+        let phrase = store.get_key_passphrase(meta.id).await.unwrap().unwrap();
+        assert_eq!(phrase.expose_secret(), "pass");
+
+        let mut identity = Identity {
+            id: IdentityId::new(),
+            label: "me".into(),
+            username: "root".into(),
+            ssh_key_id: None,
+        };
+        store
+            .insert_identity(identity.clone(), Some(pw("one")))
+            .await
+            .unwrap();
+        identity.ssh_key_id = Some(meta.id);
+        // `None` leaves the password alone.
+        store.update_identity(identity.clone(), None).await.unwrap();
+        let got = store.get_identity_password(identity.id).await.unwrap();
+        assert_eq!(got.unwrap().expose_secret(), "one");
+        // `Some(None)` clears it.
+        store
+            .update_identity(identity.clone(), Some(None))
+            .await
+            .unwrap();
+        assert!(!store.identity_has_password(identity.id).await.unwrap());
+        assert_eq!(store.list_identities().await.unwrap(), vec![identity]);
+        assert!(store.delete_key(meta.id).await.unwrap());
     }
 
     #[tokio::test]
