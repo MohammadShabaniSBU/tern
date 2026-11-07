@@ -127,6 +127,10 @@ pub struct State {
     host_data: HostsData,
     host_sort: HostSort,
     host_form: Option<HostForm>,
+    /// A select drop-down was just closed by Esc: swallow the next Esc key press.
+    select_esc: bool,
+    /// A prompt was just submitted with Enter: swallow that same key press.
+    swallow_enter: bool,
     keys_data: KeysData,
     key_form: Option<KeyForm>,
     io_form: Option<IoForm>,
@@ -180,6 +184,10 @@ pub struct LoadedSettings {
 
 #[derive(Debug, Clone)]
 pub enum Message {
+    /// Does nothing (inert widget callbacks).
+    Noop,
+    /// Esc closed a form select's drop-down; the Esc key press that follows must not also cancel the form.
+    SelectEscaped,
     VaultChecked(Result<bool, String>),
     PasswordChanged(Sensitive),
     ConfirmChanged(Sensitive),
@@ -314,6 +322,8 @@ impl State {
             host_data: HostsData::default(),
             host_sort: HostSort::default(),
             host_form: None,
+            select_esc: false,
+            swallow_enter: false,
             keys_data: KeysData::default(),
             tunnels_data: TunnelsData::default(),
             tunnel_form: None,
@@ -439,8 +449,19 @@ impl State {
             Message::FocusNext => iced::widget::operation::focus_next(),
             Message::FocusPrevious => iced::widget::operation::focus_previous(),
             Message::Dispatch(action) => self.dispatch(action),
+            Message::Noop => Task::none(),
+            Message::SelectEscaped => {
+                self.select_esc = true;
+                Task::none()
+            }
             Message::Key(chord, raw) => {
                 if self.screen != Screen::Main {
+                    return Task::none();
+                }
+                if std::mem::take(&mut self.select_esc) && chord.to_text() == "esc" {
+                    return Task::none();
+                }
+                if std::mem::take(&mut self.swallow_enter) && chord.to_text() == "enter" {
                     return Task::none();
                 }
                 if let Some(task) = self.settings_key(&chord) {
@@ -1061,9 +1082,7 @@ impl State {
             Action::ImportKey | Action::PasteKey | Action::CopyPublicKey => Task::none(),
             Action::TermCopy | Action::FormCopy if self.terminal_tab() => self.term_copy(),
             Action::TermCopy => Task::none(),
-            Action::FormReveal | Action::FormGenerate | Action::FormCopy => {
-                self.host_password_action(action)
-            }
+            Action::FormReveal | Action::FormCopy => self.host_password_action(action),
             Action::Add | Action::Edit if self.section == Section::Tunnels => {
                 self.open_tunnel_form(action == Action::Edit)
             }
@@ -2258,6 +2277,7 @@ impl State {
         };
         self.prompt = None;
         self.mode = Mode::Normal;
+        self.swallow_enter = true;
         self.matcher.reset();
         if let PromptOutcome::RenameTab(id, name) = outcome {
             if let Some(t) = self.tabs.iter_mut().find(|t| t.id == id) {
@@ -2399,7 +2419,6 @@ impl State {
         };
         match action {
             Action::FormReveal => form.reveal = !form.reveal,
-            Action::FormGenerate => form.generate(),
             _ => {
                 if form.password.is_empty() {
                     self.toast(ToastKind::Info, "No password to copy");
@@ -3707,6 +3726,19 @@ mod tests {
         let _ = s.update(Message::PromptSubmit);
         assert_eq!(s.tabs[0].display_name(), "u@h0");
         let _ = id;
+    }
+
+    #[test]
+    fn enter_that_submits_a_prompt_is_not_replayed_to_the_list() {
+        let mut s = state();
+        s.screen = Screen::Main;
+        let _ = s.update(Message::Dispatch(Action::NewGroup));
+        let _ = s.update(Message::PromptChanged("prod".into()));
+        let _ = s.update(Message::PromptSubmit);
+        assert!(s.swallow_enter);
+        press(&mut s, "enter");
+        assert!(!s.swallow_enter);
+        assert!(s.tabs.is_empty());
     }
 
     #[test]

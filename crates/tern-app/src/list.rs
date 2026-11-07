@@ -8,6 +8,7 @@ use iced::widget::{column, container, row, scrollable, space, text};
 use iced::{Center, Element, Fill, Theme};
 
 use crate::app::Message;
+use crate::icons::{Icon, icon};
 use crate::theme;
 use crate::theme::style::{self, Dot, RowState};
 use crate::theme::tokens::{self, *};
@@ -397,9 +398,15 @@ pub fn view(list: &ListState, focused: bool) -> Element<'_, Message> {
             // Group header: chevron + uppercase caption.
             row![
                 indent,
-                text(if expanded { "▾" } else { "▸" })
-                    .size(TEXT_SMALL)
-                    .style(style::text_muted),
+                icon(
+                    if expanded {
+                        Icon::ChevronDown
+                    } else {
+                        Icon::ChevronRight
+                    },
+                    12.0,
+                    |p| p.text_muted,
+                ),
                 text(item.label.to_uppercase())
                     .size(TEXT_CAPTION)
                     .font(theme::UI_SEMIBOLD)

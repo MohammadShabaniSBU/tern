@@ -25,6 +25,7 @@ use tokio::sync::mpsc::Receiver;
 use crate::action::Action;
 use crate::app::Message;
 use crate::auth::Sensitive;
+use crate::icons::{Icon, icon};
 use crate::keymap::Keymap;
 use crate::palette::QuickTarget;
 use crate::term_settings::TermSettings;
@@ -446,6 +447,7 @@ pub fn tab_bar<'a>(
     let mut strip = row![].spacing(SPACE_4).align_y(iced::Alignment::End);
     strip = strip.push(tab_button(
         row![
+            icon(Icon::Server, 14.0, |p| p.text_secondary),
             text("Hosts").size(TEXT_BODY).font(theme::UI_MEDIUM),
             text(if active.is_none() {
                 key_label(keymap, Some(Action::JumpHome))

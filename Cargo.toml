@@ -23,7 +23,7 @@ secrecy = "0.10"
 zeroize = "1"
 # `web-colors` is off on purpose: with it, drivers that only expose sRGB surfaces gamma-encode
 # every colour twice and the palette looks washed out.
-iced = { version = "0.14", default-features = false, features = ["tokio", "canvas", "advanced", "wgpu", "tiny-skia", "crisp", "thread-pool", "linux-theme-detection", "x11", "wayland"] }
+iced = { version = "0.14", default-features = false, features = ["tokio", "canvas", "svg", "advanced", "wgpu", "tiny-skia", "crisp", "thread-pool", "linux-theme-detection", "x11", "wayland"] }
 anyhow = "1"
 directories = "6"
 serde_json = "1"

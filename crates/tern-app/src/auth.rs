@@ -8,6 +8,7 @@ use secrecy::SecretString;
 use zeroize::Zeroizing;
 
 use crate::app::Message;
+use crate::icons::{Icon, icon};
 use crate::theme::tokens::*;
 
 pub const PASSWORD_ID: &str = "auth-password";
@@ -182,6 +183,19 @@ pub fn unlock_view(form: &AuthForm) -> Element<'_, Message> {
     }
     card(
         column![
+            container(icon(Icon::Lock, 22.0, |p| p.accent))
+                .padding(SPACE_12)
+                .style(|t: &iced::Theme| {
+                    let p = crate::theme::palette(t);
+                    container::Style {
+                        background: Some(p.bg_raised.into()),
+                        border: iced::Border::default()
+                            .rounded(RADIUS_MD)
+                            .width(1.0)
+                            .color(p.border_strong),
+                        ..Default::default()
+                    }
+                }),
             text("Unlock tern")
                 .size(TEXT_DISPLAY)
                 .font(crate::theme::UI_SEMIBOLD),

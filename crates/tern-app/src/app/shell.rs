@@ -6,6 +6,7 @@ use iced::{Center, Element, Fill, Theme};
 
 use super::{Message, Mode, Pane, State};
 use crate::action::{Action, Section};
+use crate::icons::{Icon, icon};
 use crate::list;
 use crate::sessions::Phase;
 use crate::theme::style::{self, ButtonKind, Dot};
@@ -103,6 +104,19 @@ impl State {
             };
             let count = self.lists[n].len_leaves();
             let line = row![
+                icon(
+                    match section {
+                        Section::Hosts => Icon::Server,
+                        Section::Keys => Icon::Key,
+                        Section::Tunnels => Icon::Tunnel,
+                    },
+                    16.0,
+                    if active {
+                        |p| p.accent
+                    } else {
+                        |p| p.text_muted
+                    },
+                ),
                 text(section.label())
                     .size(TEXT_LABEL)
                     .font(if active { theme::UI_MEDIUM } else { theme::UI })
@@ -165,7 +179,7 @@ impl State {
         if tunnels > 0 {
             live = live.push(
                 row![
-                    text("⇄").size(TEXT_SMALL).style(style::text_success),
+                    icon(Icon::Tunnel, 14.0, |p| p.success),
                     text(format!("{tunnels} tunnel(s)"))
                         .size(TEXT_BODY)
                         .style(style::text_secondary),
@@ -181,7 +195,7 @@ impl State {
                 space().width(Fill),
                 container(
                     row![
-                        text("🔓").size(TEXT_CAPTION),
+                        icon(Icon::LockOpen, 12.0, |p| p.success),
                         text("Unlocked").size(TEXT_CAPTION)
                     ]
                     .spacing(SPACE_4)
@@ -210,12 +224,14 @@ impl State {
         let commands = button(
             container(
                 row![
+                    icon(Icon::Search, 14.0, |p| p.text_muted),
                     text("Commands")
                         .size(TEXT_BODY)
                         .style(style::text_secondary),
                     space().width(Fill),
                     kbd("Ctrl K"),
                 ]
+                .spacing(SPACE_8)
                 .align_y(Center),
             )
             .center_y(Fill),
@@ -267,8 +283,20 @@ impl State {
             .on_input(Message::FilterChanged)
             .on_submit(Message::FilterSubmitted)
             .size(TEXT_BODY)
-            .padding([SPACE_8, SPACE_10])
+            .padding(iced::Padding {
+                top: SPACE_8,
+                bottom: SPACE_8,
+                right: SPACE_10,
+                left: SPACE_10 + 22.0,
+            })
             .style(style::input(false));
+        let filter = iced::widget::stack![
+            filter,
+            container(icon(Icon::Search, 14.0, |p| p.text_muted))
+                .padding([0.0, SPACE_10])
+                .height(Fill)
+                .align_y(Center),
+        ];
 
         let footer = row![
             hint("j k", "move"),
@@ -285,17 +313,8 @@ impl State {
             container(list::view(list_state, self.pane == Pane::List))
                 .padding([0.0, SPACE_8])
                 .height(Fill),
-            container(footer)
-                .padding([SPACE_8, SPACE_16])
-                .width(Fill)
-                .style(|t: &Theme| container::Style {
-                    border: iced::Border {
-                        color: palette(t).border_subtle,
-                        width: 1.0,
-                        radius: 0.0.into(),
-                    },
-                    ..Default::default()
-                }),
+            container(space().width(Fill).height(1.0)).style(style::divider),
+            container(footer).padding([SPACE_8, SPACE_16]).width(Fill),
         ])
         .width(Fill)
         .height(Fill)
@@ -426,16 +445,26 @@ impl State {
         let tunnels = self.active_tunnel_count();
         if tunnels > 0 {
             right = right.push(
-                text(format!("⇄ {tunnels} tunnel"))
-                    .size(TEXT_SMALL)
-                    .style(style::text_secondary),
+                row![
+                    icon(Icon::Tunnel, 13.0, |p| p.text_secondary),
+                    text(format!("{tunnels} tunnel"))
+                        .size(TEXT_SMALL)
+                        .style(style::text_secondary),
+                ]
+                .spacing(SPACE_4)
+                .align_y(Center),
             );
         }
         if self.screen == super::Screen::Main {
             right = right.push(
-                text("Vault unlocked")
-                    .size(TEXT_SMALL)
-                    .style(style::text_secondary),
+                row![
+                    icon(Icon::LockOpen, 13.0, |p| p.text_secondary),
+                    text("Vault unlocked")
+                        .size(TEXT_SMALL)
+                        .style(style::text_secondary),
+                ]
+                .spacing(SPACE_4)
+                .align_y(Center),
             );
         }
         right = right.push(text("? help").size(TEXT_SMALL).style(style::text_muted));
@@ -474,19 +503,16 @@ impl State {
         let mut stack = column![].spacing(SPACE_8);
         for t in &all[start..] {
             let error = t.kind == ToastKind::Error;
-            let (icon, icon_style): (&str, fn(&Theme) -> text::Style) = match t.kind {
-                ToastKind::Success => ("●", style::text_success),
-                ToastKind::Info => ("●", style::text_accent),
-                ToastKind::Error => ("●", style::text_error),
+            let glyph: Element<'_, Message> = match t.kind {
+                ToastKind::Success => icon(Icon::Check, 16.0, |p| p.success),
+                ToastKind::Info => text("●").size(TEXT_SMALL).style(style::text_accent).into(),
+                ToastKind::Error => icon(Icon::AlertCircle, 16.0, |p| p.error),
             };
             stack = stack.push(
                 container(
-                    row![
-                        text(icon).size(TEXT_SMALL).style(icon_style),
-                        text(t.text.as_str()).size(TEXT_LABEL),
-                    ]
-                    .spacing(SPACE_10)
-                    .align_y(Center),
+                    row![glyph, text(t.text.as_str()).size(TEXT_LABEL),]
+                        .spacing(SPACE_10)
+                        .align_y(Center),
                 )
                 .width(TOAST_W)
                 .padding([SPACE_10, SPACE_12])

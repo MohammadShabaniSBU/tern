@@ -74,7 +74,6 @@ A remote shell needs `Ctrl+A`, `Ctrl+W`, `Ctrl+K`, etc. So while a terminal is f
 | `Tab` / `Shift+Tab` | Next / previous field |
 | `Ctrl+S` | Save |
 | `Esc` | Cancel (confirm if dirty) |
-| `Ctrl+G` | Generate (key / password fields) |
 
 ### Terminal (Insert mode)
 

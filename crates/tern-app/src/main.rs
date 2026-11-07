@@ -6,6 +6,7 @@ mod cheatsheet;
 mod crash;
 mod host_form;
 mod hosts_view;
+mod icons;
 mod io_form;
 mod key_form;
 mod keymap;
@@ -17,6 +18,7 @@ mod palette;
 mod paths;
 mod prompt;
 mod reauth;
+mod select;
 mod sessions;
 mod settings;
 mod term_settings;
@@ -28,7 +30,27 @@ mod tunnels_view;
 
 use app::State;
 
+/// wgpu probes every Vulkan/GL driver it finds (NVIDIA + Mesa/LLVM here), which costs ~65 MB of
+/// resident memory. Unless the user chose a backend, restart ourselves pinned to Vulkan.
+/// (`set_var` is `unsafe` in edition 2024 and `unsafe` is forbidden, so re-exec instead.)
+#[cfg(unix)]
+fn pin_gpu_backend() {
+    use std::os::unix::process::CommandExt;
+    if std::env::var_os("WGPU_BACKEND").is_some() {
+        return;
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        // Only returns on failure; then we simply carry on with the default.
+        let _ = std::process::Command::new(exe)
+            .args(std::env::args_os().skip(1))
+            .env("WGPU_BACKEND", "vulkan")
+            .exec();
+    }
+}
+
 fn main() -> anyhow::Result<()> {
+    #[cfg(unix)]
+    pin_gpu_backend();
     let data_dir = paths::ensure_data_dir()?;
     let _log_guard = logging::init(&data_dir)?;
     crash::install(data_dir.clone());

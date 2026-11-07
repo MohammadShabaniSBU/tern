@@ -1,11 +1,12 @@
 //! Tunnel add/edit form (S6-T01): pure model + view. Saving is wired in `app.rs`.
 
-use iced::widget::{checkbox, column, pick_list, row, space, text, text_input};
-use iced::{Element, Fill};
+use iced::Element;
+use iced::widget::{checkbox, column, row, space, text, text_input};
 use tern_core::{Host, HostId, Tunnel, TunnelId, TunnelKind};
 
 use crate::app::Message;
 use crate::host_form::Choice;
+use crate::select::{self, SelectSpec};
 use crate::theme::tokens::*;
 use crate::tunnels_view::kind_label;
 
@@ -209,8 +210,17 @@ pub fn view(form: &TunnelForm) -> Element<'_, Message> {
         .spacing(SPACE_8)
         .align_y(iced::Center)
     };
-    let current =
-        |options: &[Choice], id: &Option<String>| options.iter().find(|c| &c.id == id).cloned();
+    let choose = |id: &'static str,
+                  options: &[Choice],
+                  current: &Option<String>,
+                  pick: fn(Choice) -> Message| {
+        select::view(SelectSpec {
+            id,
+            labels: options.iter().map(|c| c.label.clone()).collect(),
+            current: options.iter().position(|c| &c.id == current).unwrap_or(0),
+            picks: options.iter().map(|c| pick(c.clone())).collect(),
+        })
+    };
     let title = if form.is_edit() {
         "Edit tunnel"
     } else {
@@ -222,24 +232,16 @@ pub fn view(form: &TunnelForm) -> Element<'_, Message> {
         input("Label", TField::Label, &f.label),
         row![
             text("Host").size(TEXT_BODY).width(100),
-            pick_list(form.hosts.clone(), current(&form.hosts, &f.host), |c| {
-                Message::TunnelHost(c)
-            })
-            .text_size(14)
-            .width(Fill),
+            choose("tf-host", &form.hosts, &f.host, Message::TunnelHost),
         ]
         .spacing(SPACE_8)
-        .align_y(iced::Center),
+        .align_y(iced::Alignment::Start),
         row![
             text("Kind").size(TEXT_BODY).width(100),
-            pick_list(form.kinds.clone(), current(&form.kinds, &kind_id), |c| {
-                Message::TunnelKind(c)
-            })
-            .text_size(14)
-            .width(Fill),
+            choose("tf-kind", &form.kinds, &kind_id, Message::TunnelKind),
         ]
         .spacing(SPACE_8)
-        .align_y(iced::Center),
+        .align_y(iced::Alignment::Start),
         input("Bind address", TField::BindAddr, &f.bind_addr),
         input("Bind port", TField::BindPort, &f.bind_port),
     ]

@@ -33,7 +33,7 @@
 
 ### S3-T05 — Identities (M)
 - Identity = label + username + optional password + optional key.
-- Password field: reveal toggle (`Ctrl+R`), generate (`Ctrl+G`), copy with 30 s clipboard auto-clear.
+- Password field: reveal toggle (`Ctrl+R`), copy with 30 s clipboard auto-clear.
 
 ### S3-T06 — Host search & quick connect picker (M)
 - `/` filters the host list (label, hostname, tags, group).

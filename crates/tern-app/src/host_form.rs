@@ -1,8 +1,7 @@
 //! Host add/edit form (S3-T02): pure model + view. Saving is wired in `app.rs`.
 
-use iced::widget::{checkbox, column, pick_list, row, space, text, text_input};
-use iced::{Element, Fill};
-use rand::RngExt;
+use iced::Element;
+use iced::widget::{checkbox, column, row, space, text, text_input};
 use secrecy::SecretString;
 use tern_core::{Host, HostAuth, HostId};
 
@@ -10,6 +9,7 @@ use crate::auth::Sensitive;
 
 use crate::app::Message;
 use crate::hosts_view::HostsData;
+use crate::select::{self, SelectSpec};
 use crate::theme::tokens::*;
 
 /// An entry of a picker; `id == None` is the "(none)" entry.
@@ -60,17 +60,6 @@ impl Field {
         }
     }
 }
-
-/// Random password drawn from an unambiguous character set.
-pub fn generate_password() -> String {
-    let mut rng = rand::rng();
-    (0..GENERATED_LEN)
-        .map(|_| char::from(CHARSET[rng.random_range(0..CHARSET.len())]))
-        .collect()
-}
-
-const GENERATED_LEN: usize = 24;
-const CHARSET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#%^*-_=+";
 
 /// How the host authenticates, as offered in the form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -258,13 +247,6 @@ impl HostForm {
         self.touched();
     }
 
-    pub fn generate(&mut self) {
-        self.password = Sensitive::new(generate_password());
-        self.reveal = true;
-        self.clear_password = false;
-        self.touched();
-    }
-
     fn touched(&mut self) {
         self.error = None;
         self.discard_armed = false;
@@ -389,17 +371,25 @@ pub fn view(form: &HostForm) -> Element<'_, Message> {
         .spacing(SPACE_8)
         .align_y(iced::Center)
     };
-    let picker = |label: &'static str, which: Picker, options: &[Choice], current: &Choice| {
+    let picker = |label: &'static str,
+                  id: &'static str,
+                  which: Picker,
+                  options: &[Choice],
+                  current: &Choice| {
         row![
             text(label).size(TEXT_BODY).width(100),
-            pick_list(options.to_vec(), Some(current.clone()), move |c| {
-                Message::FormPick(which, c)
-            })
-            .text_size(14)
-            .width(Fill),
+            select::view(SelectSpec {
+                id,
+                labels: options.iter().map(|c| c.label.clone()).collect(),
+                current: options.iter().position(|c| c == current).unwrap_or(0),
+                picks: options
+                    .iter()
+                    .map(|c| Message::FormPick(which, c.clone()))
+                    .collect(),
+            }),
         ]
         .spacing(SPACE_8)
-        .align_y(iced::Center)
+        .align_y(iced::Alignment::Start)
     };
     let title = if form.is_edit() {
         "Edit host"
@@ -414,12 +404,18 @@ pub fn view(form: &HostForm) -> Element<'_, Message> {
         input("Username", Field::Username, &f.username),
         row![
             text("Auth").size(TEXT_BODY).width(100),
-            pick_list(AuthKind::ALL.to_vec(), Some(f.auth), Message::FormAuth)
-                .text_size(14)
-                .width(Fill),
+            select::view(SelectSpec {
+                id: "hf-auth",
+                labels: AuthKind::ALL.iter().map(|a| a.to_string()).collect(),
+                current: AuthKind::ALL.iter().position(|a| *a == f.auth).unwrap_or(0),
+                picks: AuthKind::ALL
+                    .iter()
+                    .map(|a| Message::FormAuth(*a))
+                    .collect(),
+            }),
         ]
         .spacing(SPACE_8)
-        .align_y(iced::Center),
+        .align_y(iced::Alignment::Start),
     ]
     .spacing(SPACE_8);
     // The auth-specific row goes right under the picker.
@@ -446,15 +442,27 @@ pub fn view(form: &HostForm) -> Element<'_, Message> {
                 .into(),
             )
         }
-        AuthKind::Key => Some(picker("Key", Picker::Key, &form.keys, &f.key).into()),
+        AuthKind::Key => Some(picker("Key", "hf-key", Picker::Key, &form.keys, &f.key).into()),
         AuthKind::Ask => None,
     };
     if let Some(extra) = extra {
         body = body.push(extra);
     }
     body = body
-        .push(picker("Group", Picker::Group, &form.groups, &f.group))
-        .push(picker("Jump host", Picker::Jump, &form.jumps, &f.jump))
+        .push(picker(
+            "Group",
+            "hf-group",
+            Picker::Group,
+            &form.groups,
+            &f.group,
+        ))
+        .push(picker(
+            "Jump host",
+            "hf-jump",
+            Picker::Jump,
+            &form.jumps,
+            &f.jump,
+        ))
         .push(input("Tags", Field::Tags, &f.tags))
         .push(input("Keepalive (s)", Field::Keepalive, &f.keepalive))
         .push(input("Notes", Field::Notes, &f.notes));
@@ -473,7 +481,7 @@ pub fn view(form: &HostForm) -> Element<'_, Message> {
         );
     }
     let hints = if f.auth == AuthKind::Password {
-        "Tab next   Ctrl+R reveal   Ctrl+G generate   Ctrl+Shift+C copy (clears in 30 s)   Ctrl+S save   Esc cancel"
+        "Tab next   Ctrl+R reveal   Ctrl+Shift+C copy (clears in 30 s)   Ctrl+S save   Esc cancel"
     } else {
         "Tab next field   Ctrl+S / Enter save   Esc cancel"
     };
@@ -593,13 +601,6 @@ mod tests {
         f.set_auth(AuthKind::Ask);
         assert!(f.build().is_ok());
         assert!(matches!(f.password_change(), Some(None)));
-    }
-
-    #[test]
-    fn generated_passwords_are_long_and_distinct() {
-        let (a, b) = (generate_password(), generate_password());
-        assert_eq!(a.len(), GENERATED_LEN);
-        assert_ne!(a, b);
     }
 
     #[test]

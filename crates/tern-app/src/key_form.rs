@@ -1,11 +1,12 @@
 //! Generate / import / paste SSH key form (S3-T04).
 
-use iced::widget::{column, pick_list, row, text, text_editor, text_input};
-use iced::{Element, Fill};
+use iced::Element;
+use iced::widget::{column, row, text, text_editor, text_input};
 use tern_ssh::keys::KeyKind;
 
 use crate::app::Message;
 use crate::auth::Sensitive;
+use crate::select::{self, SelectSpec};
 use crate::theme::tokens::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,9 +150,18 @@ pub fn view(form: &KeyForm) -> Element<'_, Message> {
     if form.mode == KeyMode::Generate {
         body = body.push(field(
             "Type",
-            pick_list(KeyKind::ALL, Some(form.kind), Message::KeyKindPicked)
-                .width(Fill)
-                .into(),
+            select::view(SelectSpec {
+                id: "kf-kind",
+                labels: KeyKind::ALL.iter().map(|k| k.to_string()).collect(),
+                current: KeyKind::ALL
+                    .iter()
+                    .position(|k| *k == form.kind)
+                    .unwrap_or(0),
+                picks: KeyKind::ALL
+                    .iter()
+                    .map(|k| Message::KeyKindPicked(*k))
+                    .collect(),
+            }),
         ));
     }
     body = body.push(field(

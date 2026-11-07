@@ -404,7 +404,8 @@ impl<Message> TerminalView<'_, Message> {
             font,
             align_x: iced::advanced::text::Alignment::Left,
             align_y: alignment::Vertical::Top,
-            shaping: iced::widget::text::Shaping::Basic,
+            // Advanced shaping is what applies the font's ligatures (`calt`), like Ghostty does.
+            shaping: iced::widget::text::Shaping::Advanced,
             ..Text::default()
         });
     }

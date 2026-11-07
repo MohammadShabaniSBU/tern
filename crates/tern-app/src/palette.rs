@@ -10,6 +10,7 @@ use nucleo_matcher::{Config, Matcher, Utf32Str};
 
 use crate::action::{Action, ModeMask};
 use crate::app::Message;
+use crate::icons::{Icon, icon};
 use crate::keymap::Keymap;
 use crate::theme::tokens::*;
 use crate::theme::{self, style};
@@ -307,12 +308,25 @@ pub fn pretty_keys(keys: &str) -> String {
         .join(" ")
 }
 
+fn entry_icon(target: &Target) -> Icon {
+    match target {
+        Target::Connect(_) | Target::Quick(_) => Icon::Plug,
+        Target::ToggleTunnel(_) => Icon::Tunnel,
+        Target::SaveQuick(_) => Icon::Plus,
+        Target::Action(a) => match a {
+            Action::Add | Action::PasteKey => Icon::Plus,
+            Action::Edit => Icon::Pencil,
+            Action::GoHosts => Icon::Server,
+            Action::GoKeys => Icon::Key,
+            Action::GoTunnels => Icon::Tunnel,
+            _ => Icon::Folder,
+        },
+    }
+}
+
 pub fn view(p: &Palette) -> Element<'_, Message> {
     let input = row![
-        text(">")
-            .size(TEXT_LABEL)
-            .font(theme::MONO_SEMIBOLD)
-            .style(style::text_color(|c| c.mode_palette)),
+        icon(Icon::ChevronRight, 16.0, |c| c.mode_palette),
         text_input("Type a command or host…", &p.query)
             .id(PALETTE_ID)
             .on_input(Message::PaletteQueryChanged)
@@ -340,6 +354,7 @@ pub fn view(p: &Palette) -> Element<'_, Message> {
         list = list.push(
             container(
                 row![
+                    icon(entry_icon(&entry.target), 16.0, |c| c.text_muted),
                     text(entry.title.as_str())
                         .size(TEXT_LABEL)
                         .style(style::text_primary),
@@ -349,6 +364,7 @@ pub fn view(p: &Palette) -> Element<'_, Message> {
                         .font(theme::MONO)
                         .style(style::text_muted),
                 ]
+                .spacing(SPACE_10)
                 .align_y(iced::Center),
             )
             .width(Fill)
