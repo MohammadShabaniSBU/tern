@@ -161,6 +161,7 @@ actions! {
     ImportSshKeys => "io.import_ssh_keys", "Import keys from ~/.ssh…", Vault, [], G;
     ExportSshConfig => "io.export_ssh_config", "Export hosts as ssh_config snippet…", Vault, [], G;
     ScheduleBackups => "io.schedule_backups", "Scheduled backup settings…", Vault, [], G;
+    CopyFile     => "ssh.copy_file", "Copy a file to/from the selected host…", General, [], G;
     PasteKey     => "key.paste",      "Add SSH key from clipboard", List, ["shift+p"], N;
     CopyPublicKey => "key.copy_public", "Copy public key",     List, ["shift+y"], N;
     ToggleMark   => "list.mark",      "Mark/unmark for bulk actions", List, ["space"], N;

@@ -547,3 +547,31 @@ async fn terminal_through_a_jump_host_verifies_every_hop() {
     assert_eq!(prompts[0].0, e.host);
     assert_eq!(prompts[1].0, thost);
 }
+
+#[tokio::test]
+async fn sftp_upload_then_download_round_trips() {
+    let Some(e) = env() else { return };
+    let conn = shared(&e).await;
+    let dir = std::env::temp_dir().join(format!("tern-sftp-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = dir.join("src.bin");
+    let back = dir.join("back.bin");
+    let bytes: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+    std::fs::write(&src, &bytes).unwrap();
+    let remote = format!("/tmp/tern-sftp-{}.bin", std::process::id());
+
+    let up = tern_ssh::sftp::upload(&conn, &src, &remote).await.unwrap();
+    assert_eq!(up, bytes.len() as u64);
+    let down = tern_ssh::sftp::download(&conn, &remote, &back)
+        .await
+        .unwrap();
+    assert_eq!(down, bytes.len() as u64);
+    assert_eq!(std::fs::read(&back).unwrap(), bytes);
+    // A second download refuses to overwrite.
+    assert!(
+        tern_ssh::sftp::download(&conn, &remote, &back)
+            .await
+            .is_err()
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}

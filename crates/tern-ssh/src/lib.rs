@@ -5,6 +5,7 @@ pub mod known_hosts;
 pub mod manager;
 pub mod pool;
 pub mod session;
+pub mod sftp;
 pub mod socks5;
 pub mod tunnel;
 

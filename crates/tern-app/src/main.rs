@@ -21,6 +21,7 @@ mod reauth;
 mod select;
 mod sessions;
 mod settings;
+mod sftp_form;
 mod term_settings;
 mod theme;
 mod toast;

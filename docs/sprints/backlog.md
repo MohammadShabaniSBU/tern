@@ -4,7 +4,7 @@ Ideas ranked roughly by value. Each can become its own sprint.
 
 | ID | Item | Notes |
 |---|---|---|
-| B-01 | **SFTP browser** | `russh-sftp`; dual-pane keyboard file manager (`j/k`, `Enter` to descend, `y/p` to copy, upload/download queue). Reuses the connection pool. |
+| B-01 | **SFTP browser** | `russh-sftp`; dual-pane keyboard file manager (`j/k`, `Enter` to descend, `y/p` to copy, upload/download queue). Reuses the connection pool. | **Partly done:** palette action "Copy a file to/from the selected host…" copies one file (type both paths); no browser yet.
 | B-02 | **Snippets** | Saved commands with variables (`{{port}}`), run in current tab via palette; stored in a `snippets` table. |
 | B-03 | **Split panes** | Horizontal/vertical splits inside a tab (`Ctrl+Shift+\`, `Ctrl+Shift+-`), move focus with leader + `h/j/k/l`. |
 | B-04 | **Broadcast input** | Type into several sessions at once. |

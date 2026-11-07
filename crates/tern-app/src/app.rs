@@ -23,6 +23,7 @@ use crate::prompt::{self, Prompt, PromptKind, PromptOutcome};
 use crate::reauth::{self, Gate, ReauthPrompt, SensitiveOp};
 use crate::sessions::{self, AppKnownHosts, ConnTarget, Phase, SessionId, SessionView, Spawned};
 use crate::settings::{self, SettingsMsg, SettingsScreen};
+use crate::sftp_form::{self, SftpForm};
 use crate::term_settings::{self, TermSettings};
 use crate::toast::{ToastKind, Toasts};
 use crate::tunnel_form::{self, TField, TunnelForm};
@@ -33,6 +34,7 @@ use tern_term::{Motion, SelectKind};
 
 mod io_ops;
 mod settings_ops;
+mod sftp_ops;
 mod shell;
 
 /// Which part of the app owns the keyboard. See `docs/KEYBINDINGS.md`.
@@ -134,6 +136,7 @@ pub struct State {
     keys_data: KeysData,
     key_form: Option<KeyForm>,
     io_form: Option<IoForm>,
+    sftp_form: Option<SftpForm>,
     settings: Option<SettingsScreen>,
     /// User keymap overrides (`action id -> keys`), mirrored from the `keymap` setting.
     keymap_overrides: std::collections::BTreeMap<String, Vec<String>>,
@@ -261,6 +264,11 @@ pub enum Message {
     IoSubmit,
     IoPreviewed(Result<Preview, String>),
     IoDone(Result<String, String>),
+    SftpRemote(String),
+    SftpLocal(String),
+    SftpDirection(crate::sftp_form::Direction),
+    SftpSubmit,
+    SftpDone(Result<String, String>),
     IoScheduleLoaded(String, bool, u32),
     AutoBackupDue(bool),
     ClipboardRead(Option<String>),
@@ -334,6 +342,7 @@ impl State {
             tunnels_loaded: false,
             key_form: None,
             io_form: None,
+            sftp_form: None,
             settings: None,
             keymap_overrides: std::collections::BTreeMap::new(),
             leader_setting: None,
@@ -723,6 +732,11 @@ impl State {
             Message::IoSubmit => self.submit_io(),
             Message::IoPreviewed(r) => self.io_previewed(r),
             Message::IoDone(r) => self.io_done(r),
+            Message::SftpRemote(v) => self.edit_sftp(|f| f.remote = v),
+            Message::SftpLocal(v) => self.edit_sftp(|f| f.local = v),
+            Message::SftpDirection(v) => self.edit_sftp(|f| f.direction = v),
+            Message::SftpSubmit => self.submit_sftp(),
+            Message::SftpDone(r) => self.sftp_done(r),
             Message::IoScheduleLoaded(dir, on, keep) => self.edit_io(|f| {
                 if f.kind == IoKind::BackupSchedule && f.path.is_empty() && f.extra.is_empty() {
                     f.path = dir;
@@ -822,6 +836,7 @@ impl State {
                 self.prompt = None;
                 self.key_form = None;
                 self.io_form = None;
+                self.sftp_form = None;
                 self.settings = None;
                 self.reauth = None;
                 self.revealed = None;
@@ -1092,6 +1107,8 @@ impl State {
             Action::FormSave if self.tunnel_form.is_some() => self.save_tunnel_form(),
             Action::FormSave if self.key_form.is_some() => self.submit_key_form(),
             Action::FormSave if self.io_form.is_some() => self.submit_io(),
+            Action::FormSave if self.sftp_form.is_some() => self.submit_sftp(),
+            Action::CopyFile => self.open_sftp(),
             Action::ExportBackup => {
                 self.request_sensitive(SensitiveOp::OpenIo(IoKind::ExportBackup))
             }
@@ -1438,6 +1455,10 @@ impl State {
                 return Task::none();
             }
             self.io_form = None;
+            return self.leave_insert();
+        }
+        if self.sftp_form.as_ref().is_some_and(|f| !f.busy) {
+            self.sftp_form = None;
             return self.leave_insert();
         }
         if self.settings.is_some() {
@@ -2410,6 +2431,7 @@ impl State {
             || self.tunnel_form.is_some()
             || self.key_form.is_some()
             || self.io_form.is_some()
+            || self.sftp_form.is_some()
             || self.settings.is_some()
     }
 
@@ -3158,6 +3180,9 @@ impl State {
         }
         if let Some(f) = &self.io_form {
             return iced::widget::stack![base, io_form::view(f)].into();
+        }
+        if let Some(f) = &self.sftp_form {
+            return iced::widget::stack![base, sftp_form::view(f)].into();
         }
         if let Some(s) = &self.settings {
             let ctx = settings::ViewCtx {
