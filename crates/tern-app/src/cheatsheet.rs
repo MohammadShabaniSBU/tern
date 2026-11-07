@@ -1,12 +1,13 @@
 //! Keybinding cheat sheet (S2-T09), generated from the action registry.
 
-use iced::widget::{column, container, scrollable, space, text};
-use iced::{Color, Element, Fill, Theme};
+use iced::widget::{column, scrollable, space, text};
+use iced::{Element, Fill};
 
 use crate::action::{Action, Category, ModeMask};
 use crate::app::Message;
 use crate::keymap::Keymap;
 use crate::palette::pretty_keys;
+use crate::theme::tokens::*;
 
 /// One line of the sheet.
 #[derive(Debug, PartialEq, Eq)]
@@ -45,10 +46,10 @@ pub fn sections(keymap: &Keymap, mode: ModeMask) -> Vec<(Category, Vec<Row>)> {
 
 pub fn view<'a>(keymap: &Keymap, mode: ModeMask) -> Element<'a, Message> {
     let mut body = column![
-        text("Keybindings").size(20),
-        text("Esc / F1 to close").size(12)
+        text("Keybindings").size(TEXT_DISPLAY),
+        text("Esc / F1 to close").size(TEXT_SMALL)
     ]
-    .spacing(4);
+    .spacing(SPACE_4);
     for (category, rows) in sections(keymap, mode) {
         body = body.push(space().height(10));
         body = body.push(text(category.label()).size(15).style(text::primary));
@@ -59,27 +60,15 @@ pub fn view<'a>(keymap: &Keymap, mode: ModeMask) -> Element<'a, Message> {
                 row.keys
             };
             body = body.push(
-                iced::widget::row![text(row.title).size(13).width(Fill), text(keys).size(13),]
-                    .spacing(24),
+                iced::widget::row![
+                    text(row.title).size(TEXT_BODY).width(Fill),
+                    text(keys).size(TEXT_BODY),
+                ]
+                .spacing(SPACE_24),
             );
         }
     }
-    let panel = container(scrollable(body.padding(4)))
-        .padding(16)
-        .width(560)
-        .max_height(560)
-        .style(|theme: &Theme| {
-            let mut s = container::bordered_box(theme);
-            s.background = Some(theme.extended_palette().background.base.color.into());
-            s
-        });
-    container(panel)
-        .center(Fill)
-        .style(|_| container::Style {
-            background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.55).into()),
-            ..container::Style::default()
-        })
-        .into()
+    crate::theme::widgets::dialog(scrollable(body.padding(SPACE_4)), 560.0)
 }
 
 #[cfg(test)]

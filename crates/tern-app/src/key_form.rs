@@ -1,11 +1,12 @@
 //! Generate / import / paste SSH key form (S3-T04).
 
-use iced::widget::{column, container, pick_list, row, text, text_editor, text_input};
-use iced::{Color, Element, Fill, Theme};
+use iced::widget::{column, pick_list, row, text, text_editor, text_input};
+use iced::{Element, Fill};
 use tern_ssh::keys::KeyKind;
 
 use crate::app::Message;
 use crate::auth::Sensitive;
+use crate::theme::tokens::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyMode {
@@ -86,22 +87,23 @@ impl KeyForm {
 }
 
 fn field<'a>(label: &'static str, input: Element<'a, Message>) -> Element<'a, Message> {
-    row![text(label).size(13).width(100), input]
-        .spacing(8)
+    row![text(label).size(TEXT_BODY).width(100), input]
+        .spacing(SPACE_8)
         .align_y(iced::Center)
         .into()
 }
 
 pub fn view(form: &KeyForm) -> Element<'_, Message> {
-    let mut body = column![text(form.title()).size(18)].spacing(8);
+    let mut body = column![text(form.title()).size(TEXT_TITLE)].spacing(SPACE_8);
     if form.mode == KeyMode::ImportFile {
         body = body.push(field(
             "File",
             text_input("~/.ssh/id_ed25519", &form.path)
+                .style(crate::theme::style::input(false))
                 .id(PATH_ID)
                 .on_input(Message::KeyPathChanged)
                 .on_submit(Message::KeySubmit)
-                .padding(4)
+                .padding(SPACE_4)
                 .into(),
         ));
     }
@@ -115,10 +117,11 @@ pub fn view(form: &KeyForm) -> Element<'_, Message> {
             },
             &form.label,
         )
+        .style(crate::theme::style::input(false))
         .id(LABEL_ID)
         .on_input(Message::KeyLabelChanged)
         .on_submit(Message::KeySubmit)
-        .padding(4)
+        .padding(SPACE_4)
         .into(),
     ));
     if form.mode == KeyMode::Add {
@@ -128,17 +131,18 @@ pub fn view(form: &KeyForm) -> Element<'_, Message> {
                 .placeholder("-----BEGIN OPENSSH PRIVATE KEY-----")
                 .on_action(Message::KeyPrivateEdit)
                 .height(140)
-                .size(12)
+                .size(TEXT_SMALL)
                 .font(crate::app::MONO)
                 .into(),
         ));
         body = body.push(field(
             "Public key",
             text_input("(optional, derived from the private key)", &form.public)
+                .style(crate::theme::style::input(false))
                 .id(PUBLIC_ID)
                 .on_input(Message::KeyPublicChanged)
                 .on_submit(Message::KeySubmit)
-                .padding(4)
+                .padding(SPACE_4)
                 .into(),
         ));
     }
@@ -160,34 +164,25 @@ pub fn view(form: &KeyForm) -> Element<'_, Message> {
             },
             form.passphrase.as_str(),
         )
+        .style(crate::theme::style::input(false))
         .secure(true)
         .on_input(|v| Message::KeyPassphraseChanged(Sensitive::new(v)))
         .on_submit(Message::KeySubmit)
-        .padding(4)
+        .padding(SPACE_4)
         .into(),
     ));
     if form.busy {
-        body = body.push(text("Working… (RSA 4096 can take a while)").size(13));
+        body = body.push(text("Working… (RSA 4096 can take a while)").size(TEXT_BODY));
     }
     if let Some(e) = &form.error {
-        body = body.push(text(e.as_str()).size(13).style(text::danger));
+        body = body.push(
+            text(e.as_str())
+                .size(TEXT_BODY)
+                .style(crate::theme::style::text_error),
+        );
     }
-    body = body.push(text("Ctrl+S save   Tab next field   Esc cancel").size(12));
-    let dialog = container(body)
-        .padding(20)
-        .max_width(520)
-        .style(|theme: &Theme| {
-            let mut s = container::bordered_box(theme);
-            s.background = Some(theme.extended_palette().background.base.color.into());
-            s
-        });
-    container(dialog)
-        .center(Fill)
-        .style(|_| container::Style {
-            background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.55).into()),
-            ..container::Style::default()
-        })
-        .into()
+    body = body.push(text("Ctrl+S save   Tab next field   Esc cancel").size(TEXT_SMALL));
+    crate::theme::widgets::dialog(body, 520.0)
 }
 
 #[cfg(test)]

@@ -1,11 +1,12 @@
 //! Host add/edit form (S3-T02): pure model + view. Saving is wired in `app.rs`.
 
-use iced::widget::{column, container, pick_list, row, space, text, text_input};
-use iced::{Color, Element, Fill, Theme};
+use iced::widget::{column, pick_list, row, space, text, text_input};
+use iced::{Element, Fill};
 use tern_core::{Host, HostId};
 
 use crate::app::Message;
 use crate::hosts_view::HostsData;
+use crate::theme::tokens::*;
 
 /// An entry of a picker; `id == None` is the "(none)" entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -260,27 +261,28 @@ pub fn view(form: &HostForm) -> Element<'_, Message> {
     let f = &form.fields;
     let input = |label: &'static str, field: Field, value: &str| {
         row![
-            text(label).size(13).width(100),
+            text(label).size(TEXT_BODY).width(100),
             text_input("", value)
+                .style(crate::theme::style::input(false))
                 .id(field.id())
                 .on_input(move |v| Message::FormEdit(field, v))
                 .on_submit(Message::FormSave)
-                .size(14)
-                .padding(4),
+                .size(TEXT_LABEL)
+                .padding(SPACE_4),
         ]
-        .spacing(8)
+        .spacing(SPACE_8)
         .align_y(iced::Center)
     };
     let picker = |label: &'static str, which: Picker, options: &[Choice], current: &Choice| {
         row![
-            text(label).size(13).width(100),
+            text(label).size(TEXT_BODY).width(100),
             pick_list(options.to_vec(), Some(current.clone()), move |c| {
                 Message::FormPick(which, c)
             })
             .text_size(14)
             .width(Fill),
         ]
-        .spacing(8)
+        .spacing(SPACE_8)
         .align_y(iced::Center)
     };
     let title = if form.is_edit() {
@@ -289,7 +291,7 @@ pub fn view(form: &HostForm) -> Element<'_, Message> {
         "New host"
     };
     let mut body = column![
-        text(title).size(18),
+        text(title).size(TEXT_TITLE),
         input("Label", Field::Label, &f.label),
         input("Hostname", Field::Hostname, &f.hostname),
         input("Port", Field::Port, &f.port),
@@ -301,28 +303,18 @@ pub fn view(form: &HostForm) -> Element<'_, Message> {
         input("Keepalive (s)", Field::Keepalive, &f.keepalive),
         input("Notes", Field::Notes, &f.notes),
     ]
-    .spacing(8);
+    .spacing(SPACE_8);
     if let Some(e) = &form.error {
-        body = body.push(text(e.as_str()).size(13).style(text::danger));
+        body = body.push(
+            text(e.as_str())
+                .size(TEXT_BODY)
+                .style(crate::theme::style::text_error),
+        );
     }
     body = body
         .push(space().height(4))
-        .push(text("Tab next field   Ctrl+S / Enter save   Esc cancel").size(12));
-    let dialog = container(body)
-        .padding(20)
-        .max_width(560)
-        .style(|theme: &Theme| {
-            let mut s = container::bordered_box(theme);
-            s.background = Some(theme.extended_palette().background.base.color.into());
-            s
-        });
-    container(dialog)
-        .center(Fill)
-        .style(|_| container::Style {
-            background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.55).into()),
-            ..container::Style::default()
-        })
-        .into()
+        .push(text("Tab next field   Ctrl+S / Enter save   Esc cancel").size(TEXT_SMALL));
+    crate::theme::widgets::dialog(body, 560.0)
 }
 
 #[cfg(test)]

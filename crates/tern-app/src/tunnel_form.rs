@@ -1,11 +1,12 @@
 //! Tunnel add/edit form (S6-T01): pure model + view. Saving is wired in `app.rs`.
 
-use iced::widget::{checkbox, column, container, pick_list, row, space, text, text_input};
-use iced::{Color, Element, Fill, Theme};
+use iced::widget::{checkbox, column, pick_list, row, space, text, text_input};
+use iced::{Element, Fill};
 use tern_core::{Host, HostId, Tunnel, TunnelId, TunnelKind};
 
 use crate::app::Message;
 use crate::host_form::Choice;
+use crate::theme::tokens::*;
 use crate::tunnels_view::kind_label;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -196,15 +197,16 @@ pub fn view(form: &TunnelForm) -> Element<'_, Message> {
     let f = &form.fields;
     let input = |label: &'static str, field: TField, value: &str| {
         row![
-            text(label).size(13).width(100),
+            text(label).size(TEXT_BODY).width(100),
             text_input("", value)
+                .style(crate::theme::style::input(false))
                 .id(field.id())
                 .on_input(move |v| Message::TunnelEdit(field, v))
                 .on_submit(Message::TunnelSave)
-                .size(14)
-                .padding(4),
+                .size(TEXT_LABEL)
+                .padding(SPACE_4),
         ]
-        .spacing(8)
+        .spacing(SPACE_8)
         .align_y(iced::Center)
     };
     let current =
@@ -216,32 +218,32 @@ pub fn view(form: &TunnelForm) -> Element<'_, Message> {
     };
     let kind_id = Some(f.kind.as_str().to_owned());
     let mut body = column![
-        text(title).size(18),
+        text(title).size(TEXT_TITLE),
         input("Label", TField::Label, &f.label),
         row![
-            text("Host").size(13).width(100),
+            text("Host").size(TEXT_BODY).width(100),
             pick_list(form.hosts.clone(), current(&form.hosts, &f.host), |c| {
                 Message::TunnelHost(c)
             })
             .text_size(14)
             .width(Fill),
         ]
-        .spacing(8)
+        .spacing(SPACE_8)
         .align_y(iced::Center),
         row![
-            text("Kind").size(13).width(100),
+            text("Kind").size(TEXT_BODY).width(100),
             pick_list(form.kinds.clone(), current(&form.kinds, &kind_id), |c| {
                 Message::TunnelKind(c)
             })
             .text_size(14)
             .width(Fill),
         ]
-        .spacing(8)
+        .spacing(SPACE_8)
         .align_y(iced::Center),
         input("Bind address", TField::BindAddr, &f.bind_addr),
         input("Bind port", TField::BindPort, &f.bind_port),
     ]
-    .spacing(8);
+    .spacing(SPACE_8);
     if f.kind != TunnelKind::Dynamic {
         body = body
             .push(input("Target host", TField::TargetHost, &f.target_host))
@@ -255,29 +257,19 @@ pub fn view(form: &TunnelForm) -> Element<'_, Message> {
     if let Ok(t) = form.build()
         && let Some(w) = t.bind_warning()
     {
-        body = body.push(text(w).size(12).style(text::warning));
+        body = body.push(text(w).size(TEXT_SMALL).style(text::warning));
     }
     if let Some(e) = &form.error {
-        body = body.push(text(e.as_str()).size(13).style(text::danger));
+        body = body.push(
+            text(e.as_str())
+                .size(TEXT_BODY)
+                .style(crate::theme::style::text_error),
+        );
     }
     body = body
         .push(space().height(4))
-        .push(text("Tab next field   Ctrl+S / Enter save   Esc cancel").size(12));
-    let dialog = container(body)
-        .padding(20)
-        .max_width(560)
-        .style(|theme: &Theme| {
-            let mut s = container::bordered_box(theme);
-            s.background = Some(theme.extended_palette().background.base.color.into());
-            s
-        });
-    container(dialog)
-        .center(Fill)
-        .style(|_| container::Style {
-            background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.55).into()),
-            ..container::Style::default()
-        })
-        .into()
+        .push(text("Tab next field   Ctrl+S / Enter save   Esc cancel").size(TEXT_SMALL));
+    crate::theme::widgets::dialog(body, 560.0)
 }
 
 #[cfg(test)]

@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 
 use iced::futures::{Stream, stream};
 use iced::widget::canvas::Cache;
-use iced::widget::{button, column, container, row, text, text_input};
-use iced::{Color, Element, Fill, Theme};
+use iced::widget::{column, container, row, space, text, text_input};
+use iced::{Element, Fill};
 use secrecy::SecretString;
 use tern_core::{HostId, Identity};
 use tern_ssh::known_hosts::BoxFuture;
@@ -26,6 +26,9 @@ use crate::app::Message;
 use crate::auth::Sensitive;
 use crate::palette::QuickTarget;
 use crate::term_settings::TermSettings;
+use crate::theme;
+use crate::theme::style::{self, Dot};
+use crate::theme::tokens::*;
 
 pub const SESSION_INPUT_ID: &str = "session-input";
 pub const SEARCH_INPUT_ID: &str = "term-search";
@@ -401,50 +404,129 @@ pub struct ViewCtx<'a> {
     pub focused: bool,
 }
 
-fn phase_color(phase: &Phase) -> Color {
+fn phase_dot(phase: &Phase) -> Dot {
     match phase {
-        Phase::Connected => Color::from_rgb8(0x3f, 0xb9, 0x50),
-        Phase::Connecting | Phase::HostKey | Phase::Auth { .. } => {
-            Color::from_rgb8(0xd2, 0x99, 0x22)
-        }
-        Phase::Disconnected(None) => Color::from_rgb8(0x88, 0x88, 0x88),
-        Phase::Disconnected(Some(_)) => Color::from_rgb8(0xf8, 0x51, 0x49),
+        Phase::Connected => Dot::Live,
+        Phase::Connecting | Phase::HostKey | Phase::Auth { .. } => Dot::Connecting,
+        Phase::Disconnected(None) => Dot::Idle,
+        Phase::Disconnected(Some(_)) => Dot::Failed,
     }
 }
 
-/// The tab strip: a "Hosts" home tab followed by one button per session.
-pub fn tab_bar<'a>(tabs: &'a [SessionView], active: Option<usize>) -> Element<'a, Message> {
-    let mut strip = row![].spacing(4).padding([4, 8]);
-    let home = button(text("Hosts").size(13))
-        .padding([3, 10])
-        .style(if active.is_none() {
-            button::primary
-        } else {
-            button::secondary
-        })
-        .on_press(Message::SelectHome);
-    strip = strip.push(home);
-    for (i, t) in tabs.iter().enumerate() {
-        let label = row![
-            text("●").size(11).color(phase_color(&t.phase)),
-            text(format!("{} {}", i + 1, t.display_name())).size(13),
-        ]
-        .spacing(6)
-        .align_y(iced::Center);
-        strip = strip.push(
-            button(label)
-                .padding([3, 10])
-                .style(if active == Some(i) {
-                    button::primary
-                } else {
-                    button::secondary
-                })
-                .on_press(Message::SelectTab(i)),
-        );
+fn tab_button<'a>(
+    content: impl Into<Element<'a, Message>>,
+    active: bool,
+    on_press: Message,
+) -> Element<'a, Message> {
+    let tab = container(content)
+        .height(TAB_H)
+        .padding([0.0, SPACE_12])
+        .align_y(iced::Center)
+        .style(style::tab(active));
+    column![
+        container(space())
+            .height(2)
+            .width(Fill)
+            .style(style::tab_edge(active)),
+        tab,
+    ]
+    .pipe_mouse(on_press)
+}
+
+trait PipeMouse<'a> {
+    fn pipe_mouse(self, msg: Message) -> Element<'a, Message>;
+}
+
+impl<'a> PipeMouse<'a> for iced::widget::Column<'a, Message> {
+    fn pipe_mouse(self, msg: Message) -> Element<'a, Message> {
+        iced::widget::mouse_area(self).on_press(msg).into()
     }
-    container(strip)
-        .width(Fill)
-        .style(container::bordered_box)
+}
+
+/// The tab strip: a "Hosts" home tab followed by one tab per session.
+pub fn tab_bar<'a>(tabs: &'a [SessionView], active: Option<usize>) -> Element<'a, Message> {
+    let mut strip = row![].spacing(SPACE_4).align_y(iced::Alignment::End);
+    strip = strip.push(tab_button(
+        row![
+            text("Hosts").size(TEXT_BODY).font(theme::UI_MEDIUM),
+            text(if active.is_none() { "Alt 0" } else { "" })
+                .size(MONO_KBD)
+                .font(theme::MONO)
+                .style(style::text_muted),
+        ]
+        .spacing(SPACE_8),
+        active.is_none(),
+        Message::SelectHome,
+    ));
+    for (i, t) in tabs.iter().enumerate() {
+        let is_active = active == Some(i);
+        let state_note: Element<'a, Message> = match &t.phase {
+            Phase::Connecting | Phase::HostKey | Phase::Auth { .. } => text("connecting…")
+                .size(TEXT_CAPTION)
+                .style(style::text_warning)
+                .into(),
+            Phase::Disconnected(Some(_)) => text("lost")
+                .size(TEXT_CAPTION)
+                .style(style::text_error)
+                .into(),
+            _ => space().into(),
+        };
+        let label = row![
+            container(space())
+                .width(STATUS_DOT)
+                .height(STATUS_DOT)
+                .style(style::dot(phase_dot(&t.phase), STATUS_DOT)),
+            text(t.display_name())
+                .size(TEXT_BODY)
+                .font(if is_active {
+                    theme::UI_SEMIBOLD
+                } else {
+                    theme::UI
+                })
+                .style(if is_active {
+                    style::text_primary
+                } else {
+                    style::text_secondary
+                }),
+            state_note,
+            text(if is_active {
+                format!("Alt {}", i + 1)
+            } else {
+                String::new()
+            })
+            .size(MONO_KBD)
+            .font(theme::MONO)
+            .style(style::text_muted),
+        ]
+        .spacing(SPACE_8)
+        .align_y(iced::Center);
+        strip = strip.push(tab_button(label, is_active, Message::SelectTab(i)));
+    }
+    container(
+        row![
+            strip,
+            space().width(Fill),
+            row![
+                kbd_hint("Ctrl K"),
+                text("commands").size(TEXT_SMALL).style(style::text_muted)
+            ]
+            .spacing(SPACE_6)
+            .align_y(iced::Center)
+        ]
+        .align_y(iced::Alignment::End)
+        .padding([0.0, SPACE_8]),
+    )
+    .height(TAB_BAR_H)
+    .align_y(iced::alignment::Vertical::Bottom)
+    .width(Fill)
+    .style(style::tab_bar)
+    .into()
+}
+
+fn kbd_hint<'a>(label: &'static str) -> Element<'a, Message> {
+    container(text(label).size(MONO_KBD).font(theme::MONO))
+        .padding([0.0, 5.0])
+        .style(style::kbd)
         .into()
 }
 
@@ -488,9 +570,9 @@ pub fn view<'a>(s: &'a SessionView, ctx: &ViewCtx<'a>) -> Element<'a, Message> {
     }
     .into_element();
 
-    let mut body = column![].spacing(6);
+    let mut body = column![].spacing(SPACE_6);
     if let Some(status) = status {
-        body = body.push(text(status).size(14));
+        body = body.push(text(status).size(TEXT_LABEL));
     }
     body = body.push(container(term).width(Fill).height(Fill));
     if let Phase::Auth {
@@ -500,21 +582,22 @@ pub fn view<'a>(s: &'a SessionView, ctx: &ViewCtx<'a>) -> Element<'a, Message> {
     } = &s.phase
     {
         if !instructions.is_empty() {
-            body = body.push(text(instructions.as_str()).size(13));
+            body = body.push(text(instructions.as_str()).size(TEXT_BODY));
         }
         if let Some(p) = prompts.get(s.answers.len()) {
-            body = body.push(text(p.prompt.as_str()).size(14));
+            body = body.push(text(p.prompt.as_str()).size(TEXT_LABEL));
         }
     }
     if matches!(s.phase, Phase::Auth { .. }) {
         let secure = s.current_prompt().is_some_and(|p| !p.echo);
         body = body.push(
             text_input("", s.input.as_str())
+                .style(crate::theme::style::input(false))
                 .id(SESSION_INPUT_ID)
                 .secure(secure)
                 .on_input(|v| Message::SessionInput(Sensitive::new(v)))
                 .on_submit(Message::SessionSubmit)
-                .padding(6),
+                .padding(SPACE_6),
         );
     }
     if let Some(q) = &s.search {
@@ -524,28 +607,26 @@ pub fn view<'a>(s: &'a SessionView, ctx: &ViewCtx<'a>) -> Element<'a, Message> {
         };
         body = body.push(
             row![
-                text("Search").size(13),
+                text("Search").size(TEXT_BODY),
                 text_input("text in scrollback…", q)
+                    .style(crate::theme::style::input(false))
                     .id(SEARCH_INPUT_ID)
                     .on_input(Message::SearchQuery)
                     .on_submit(Message::SearchNext)
-                    .padding(4),
-                text(count).size(13),
-                text("Enter next  Ctrl+Shift+Alt+G prev  Esc close").size(12),
+                    .padding(SPACE_4),
+                text(count).size(TEXT_BODY),
+                text("Enter next  Ctrl+Shift+Alt+G prev  Esc close").size(TEXT_SMALL),
             ]
-            .spacing(8)
+            .spacing(SPACE_8)
             .align_y(iced::Center),
         );
     }
-    body = body.push(text(hint).size(12));
+    body = body.push(text(hint).size(TEXT_SMALL));
     container(body)
         .padding([4, 8])
         .width(Fill)
         .height(Fill)
-        .style(|theme: &Theme| container::Style {
-            background: Some(theme.extended_palette().background.base.color.into()),
-            ..container::Style::default()
-        })
+        .style(crate::theme::style::terminal_surface)
         .into()
 }
 #[cfg(test)]

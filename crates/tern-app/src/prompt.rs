@@ -1,10 +1,11 @@
 //! Single-line text prompt used for group create/rename and "move to group" (S3-T03).
 
-use iced::widget::{column, container, text, text_input};
-use iced::{Color, Element, Fill, Theme};
+use iced::Element;
+use iced::widget::{column, text, text_input};
 use tern_core::{Group, GroupId, HostId, KeyId};
 
 use crate::app::Message;
+use crate::theme::tokens::*;
 
 pub const PROMPT_ID: &str = "prompt-input";
 
@@ -135,33 +136,24 @@ impl Prompt {
 
 pub fn view(prompt: &Prompt) -> Element<'_, Message> {
     let mut body = column![
-        text(prompt.title()).size(18),
+        text(prompt.title()).size(TEXT_TITLE),
         text_input("", &prompt.input)
+            .style(crate::theme::style::input(false))
             .id(PROMPT_ID)
             .on_input(Message::PromptChanged)
             .on_submit(Message::PromptSubmit)
-            .padding(4),
+            .padding(SPACE_4),
     ]
-    .spacing(8);
+    .spacing(SPACE_8);
     if let Some(e) = &prompt.error {
-        body = body.push(text(e.as_str()).size(13).style(text::danger));
+        body = body.push(
+            text(e.as_str())
+                .size(TEXT_BODY)
+                .style(crate::theme::style::text_error),
+        );
     }
-    body = body.push(text("Enter confirm   Esc cancel").size(12));
-    let dialog = container(body)
-        .padding(20)
-        .max_width(420)
-        .style(|theme: &Theme| {
-            let mut s = container::bordered_box(theme);
-            s.background = Some(theme.extended_palette().background.base.color.into());
-            s
-        });
-    container(dialog)
-        .center(Fill)
-        .style(|_| container::Style {
-            background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.55).into()),
-            ..container::Style::default()
-        })
-        .into()
+    body = body.push(text("Enter confirm   Esc cancel").size(TEXT_SMALL));
+    crate::theme::widgets::dialog(body, 420.0)
 }
 
 #[cfg(test)]

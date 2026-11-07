@@ -3175,14 +3175,14 @@ impl State {
     pub fn view(&self) -> Element<'_, Message> {
         match self.screen {
             Screen::Loading => match &self.form.error {
-                Some(e) => container(text(e.clone()).style(text::danger))
+                Some(e) => container(text(e.clone()).style(crate::theme::style::text_error))
                     .center(Fill)
                     .into(),
                 None => container(text("Loading…")).center(Fill).into(),
             },
-            Screen::Create => auth::create_view(&self.form),
-            Screen::Unlock => auth::unlock_view(&self.form),
-            Screen::Recovery => auth::recovery_view(),
+            Screen::Create => column![auth::create_view(&self.form), self.status_bar()].into(),
+            Screen::Unlock => column![auth::unlock_view(&self.form), self.status_bar()].into(),
+            Screen::Recovery => column![auth::recovery_view(), self.status_bar()].into(),
             Screen::Main => self.main_view(),
         }
     }

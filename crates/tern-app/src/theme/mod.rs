@@ -5,6 +5,7 @@
 pub mod colors;
 pub mod style;
 pub mod tokens;
+pub mod widgets;
 
 pub use colors::{DARK, LIGHT, Palette};
 use iced::font::{Family, Weight};

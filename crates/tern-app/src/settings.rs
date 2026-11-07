@@ -5,8 +5,8 @@
 
 use std::collections::BTreeMap;
 
-use iced::widget::{button, checkbox, column, container, row, text, text_input};
-use iced::{Color, Element, Fill, Theme};
+use iced::widget::{button, checkbox, column, row, text, text_input};
+use iced::{Element, Fill, Theme};
 use tern_vault::KdfParams;
 
 use crate::action::Action;
@@ -14,6 +14,7 @@ use crate::app::Message;
 use crate::auth::Sensitive;
 use crate::keymap::Keymap;
 use crate::term_settings::TermSettings;
+use crate::theme::tokens::*;
 
 pub const IDLE_ID: &str = "set-idle";
 pub const SCROLL_ID: &str = "set-scrollback";
@@ -192,8 +193,8 @@ impl SettingsScreen {
 }
 
 fn field<'a>(label: &'static str, input: Element<'a, Message>) -> Element<'a, Message> {
-    row![text(label).size(13).width(150), input]
-        .spacing(8)
+    row![text(label).size(TEXT_BODY).width(150), input]
+        .spacing(SPACE_8)
         .align_y(iced::Center)
         .into()
 }
@@ -211,15 +212,19 @@ pub struct ViewCtx<'a> {
 }
 
 pub fn view<'a>(s: &'a SettingsScreen, ctx: &ViewCtx<'a>) -> Element<'a, Message> {
-    let tabs = Tab::ALL.iter().fold(row![].spacing(6), |r, t| {
-        let b = button(text(t.label()).size(13)).on_press(msg(SettingsMsg::Tab(*t)));
+    let tabs = Tab::ALL.iter().fold(row![].spacing(SPACE_6), |r, t| {
+        let b = button(text(t.label()).size(TEXT_BODY)).on_press(msg(SettingsMsg::Tab(*t)));
         r.push(if *t == s.tab {
-            b.style(button::primary)
+            b.style(crate::theme::style::button(
+                crate::theme::style::ButtonKind::Primary,
+            ))
         } else {
-            b.style(button::secondary)
+            b.style(crate::theme::style::button(
+                crate::theme::style::ButtonKind::Secondary,
+            ))
         })
     });
-    let mut body = column![text("Settings").size(18), tabs].spacing(10);
+    let mut body = column![text("Settings").size(TEXT_TITLE), tabs].spacing(SPACE_10);
     body = body.push(match s.tab {
         Tab::General => general(s),
         Tab::Terminal => terminal(s, ctx),
@@ -228,34 +233,28 @@ pub fn view<'a>(s: &'a SettingsScreen, ctx: &ViewCtx<'a>) -> Element<'a, Message
         Tab::About => about(ctx),
     });
     if let Some(m) = &s.message {
-        body = body.push(text(m.as_str()).size(13).style(text::success));
+        body = body.push(
+            text(m.as_str())
+                .size(TEXT_BODY)
+                .style(crate::theme::style::text_success),
+        );
     }
     if let Some(e) = &s.error {
-        body = body.push(text(e.as_str()).size(13).style(text::danger));
+        body = body.push(
+            text(e.as_str())
+                .size(TEXT_BODY)
+                .style(crate::theme::style::text_error),
+        );
     }
     if s.busy {
-        body = body.push(text("Working…").size(13));
+        body = body.push(text("Working…").size(TEXT_BODY));
     }
     body = body.push(
         text("Ctrl+Tab next section   Ctrl+S save   Esc close")
-            .size(12)
-            .style(text::secondary),
+            .size(TEXT_SMALL)
+            .style(crate::theme::style::text_secondary),
     );
-    let dialog = container(body)
-        .padding(20)
-        .max_width(640)
-        .style(|theme: &Theme| {
-            let mut st = container::bordered_box(theme);
-            st.background = Some(theme.extended_palette().background.base.color.into());
-            st
-        });
-    container(dialog)
-        .center(Fill)
-        .style(|_| container::Style {
-            background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.55).into()),
-            ..container::Style::default()
-        })
-        .into()
+    crate::theme::widgets::dialog(body, 640.0)
 }
 
 fn general(s: &SettingsScreen) -> Element<'_, Message> {
@@ -263,43 +262,48 @@ fn general(s: &SettingsScreen) -> Element<'_, Message> {
         field(
             "Auto-lock (minutes)",
             text_input("0 = never", &s.idle)
+                .style(crate::theme::style::input(false))
                 .id(IDLE_ID)
                 .on_input(|v| msg(SettingsMsg::Idle(v)))
                 .on_submit(msg(SettingsMsg::Save))
-                .padding(4)
+                .padding(SPACE_4)
                 .into()
         ),
         checkbox(s.keep)
             .label("Keep sessions and tunnels running while locked")
             .on_toggle(|v| msg(SettingsMsg::Keep(v))),
-        button(text("Scheduled backups…").size(13))
+        button(text("Scheduled backups…").size(TEXT_BODY))
             .on_press(msg(SettingsMsg::OpenBackupSettings))
-            .style(button::secondary),
+            .style(crate::theme::style::button(
+                crate::theme::style::ButtonKind::Secondary
+            )),
         text("0 disables auto-lock. The vault also locks after the computer sleeps.")
-            .size(12)
-            .style(text::secondary),
+            .size(TEXT_SMALL)
+            .style(crate::theme::style::text_secondary),
     ]
-    .spacing(8)
+    .spacing(SPACE_8)
     .into()
 }
 
 fn terminal<'a>(s: &'a SettingsScreen, ctx: &ViewCtx<'a>) -> Element<'a, Message> {
     let t = ctx.term;
     let act = |label: String, a: Action| {
-        button(text(label).size(13))
+        button(text(label).size(TEXT_BODY))
             .on_press(Message::Dispatch(a))
-            .style(button::secondary)
+            .style(crate::theme::style::button(
+                crate::theme::style::ButtonKind::Secondary,
+            ))
     };
     column![
         field(
             "Font size",
             row![
                 act("−".into(), Action::FontSmaller),
-                text(format!("{:.0}", t.font_size)).size(13),
+                text(format!("{:.0}", t.font_size)).size(TEXT_BODY),
                 act("+".into(), Action::FontBigger),
                 act("Reset".into(), Action::FontReset),
             ]
-            .spacing(8)
+            .spacing(SPACE_8)
             .align_y(iced::Center)
             .into()
         ),
@@ -314,10 +318,11 @@ fn terminal<'a>(s: &'a SettingsScreen, ctx: &ViewCtx<'a>) -> Element<'a, Message
         field(
             "Scrollback lines",
             text_input("10000", &s.scrollback)
+                .style(crate::theme::style::input(false))
                 .id(SCROLL_ID)
                 .on_input(|v| msg(SettingsMsg::Scrollback(v)))
                 .on_submit(msg(SettingsMsg::Save))
-                .padding(4)
+                .padding(SPACE_4)
                 .into()
         ),
         checkbox(t.visual_bell)
@@ -327,7 +332,7 @@ fn terminal<'a>(s: &'a SettingsScreen, ctx: &ViewCtx<'a>) -> Element<'a, Message
             .label("Warn before multi-line paste")
             .on_toggle(|_| Message::Dispatch(Action::TogglePasteWarn)),
     ]
-    .spacing(8)
+    .spacing(SPACE_8)
     .into()
 }
 
@@ -337,7 +342,7 @@ fn keybindings<'a>(s: &'a SettingsScreen, ctx: &ViewCtx<'a>) -> Element<'a, Mess
         .selected
         .saturating_sub(WINDOW / 2)
         .min(total.saturating_sub(WINDOW));
-    let mut list = column![].spacing(2);
+    let mut list = column![].spacing(SPACE_2);
     for (i, action) in Action::ALL.iter().enumerate().skip(start).take(WINDOW) {
         let meta = action.meta();
         let keys = ctx.keymap.keys_for(*action);
@@ -352,10 +357,12 @@ fn keybindings<'a>(s: &'a SettingsScreen, ctx: &ViewCtx<'a>) -> Element<'a, Mess
             " "
         };
         let line = row![
-            text(format!("{mark} {}", meta.title)).size(13).width(Fill),
-            text(keys).size(13).font(crate::app::MONO),
+            text(format!("{mark} {}", meta.title))
+                .size(TEXT_BODY)
+                .width(Fill),
+            text(keys).size(TEXT_BODY).font(crate::app::MONO),
         ]
-        .spacing(8);
+        .spacing(SPACE_8);
         let selected = i == s.selected;
         list = list.push(
             button(line)
@@ -364,20 +371,24 @@ fn keybindings<'a>(s: &'a SettingsScreen, ctx: &ViewCtx<'a>) -> Element<'a, Mess
                 .on_press(msg(SettingsMsg::KbSelect(i)))
                 .style(move |theme: &Theme, status| {
                     if selected {
-                        button::primary(theme, status)
+                        crate::theme::style::button(crate::theme::style::ButtonKind::Primary)(
+                            theme, status,
+                        )
                     } else {
-                        button::text(theme, status)
+                        crate::theme::style::button(crate::theme::style::ButtonKind::Ghost)(
+                            theme, status,
+                        )
                     }
                 }),
         );
     }
     let hint: Element<'a, Message> = match &s.capture {
         Capture::Idle => text("↑/↓ select   Enter rebind   Del unbind   r reset   * = customised")
-            .size(12)
-            .style(text::secondary)
+            .size(TEXT_SMALL)
+            .style(crate::theme::style::text_secondary)
             .into(),
         Capture::Waiting => text("Press the new key… (Esc cancels)")
-            .size(13)
+            .size(TEXT_BODY)
             .style(text::primary)
             .into(),
         Capture::Conflict { text: keys, with } => {
@@ -386,8 +397,8 @@ fn keybindings<'a>(s: &'a SettingsScreen, ctx: &ViewCtx<'a>) -> Element<'a, Mess
                 "'{keys}' is also used by: {}. Enter to use it anyway, Esc to cancel.",
                 names.join(", ")
             ))
-            .size(13)
-            .style(text::danger)
+            .size(TEXT_BODY)
+            .style(crate::theme::style::text_error)
             .into()
         }
     };
@@ -395,43 +406,56 @@ fn keybindings<'a>(s: &'a SettingsScreen, ctx: &ViewCtx<'a>) -> Element<'a, Mess
         list,
         hint,
         row![
-            button(text("Rebind").size(13))
+            button(text("Rebind").size(TEXT_BODY))
                 .on_press(msg(SettingsMsg::KbRebind))
-                .style(button::secondary),
-            button(text("Unbind").size(13))
+                .style(crate::theme::style::button(
+                    crate::theme::style::ButtonKind::Secondary
+                )),
+            button(text("Unbind").size(TEXT_BODY))
                 .on_press(msg(SettingsMsg::KbUnbind))
-                .style(button::secondary),
-            button(text("Reset").size(13))
+                .style(crate::theme::style::button(
+                    crate::theme::style::ButtonKind::Secondary
+                )),
+            button(text("Reset").size(TEXT_BODY))
                 .on_press(msg(SettingsMsg::KbReset))
-                .style(button::secondary),
-            button(text("Reset all").size(13))
+                .style(crate::theme::style::button(
+                    crate::theme::style::ButtonKind::Secondary
+                )),
+            button(text("Reset all").size(TEXT_BODY))
                 .on_press(msg(SettingsMsg::KbResetAll))
-                .style(button::secondary),
+                .style(crate::theme::style::button(
+                    crate::theme::style::ButtonKind::Secondary
+                )),
         ]
-        .spacing(6),
+        .spacing(SPACE_6),
         text("Rebinding replaces all of the action's keys with the one key you press.")
-            .size(12)
-            .style(text::secondary),
+            .size(TEXT_SMALL)
+            .style(crate::theme::style::text_secondary),
     ]
-    .spacing(8)
+    .spacing(SPACE_8)
     .into()
 }
 
 fn security(s: &SettingsScreen) -> Element<'_, Message> {
     let secret = |placeholder: &str, v: &Sensitive, f: fn(Sensitive) -> SettingsMsg| {
         text_input(placeholder, v.as_str())
+            .style(crate::theme::style::input(false))
             .secure(true)
             .on_input(move |t| msg(f(Sensitive::new(t))))
             .on_submit(msg(SettingsMsg::Save))
-            .padding(4)
+            .padding(SPACE_4)
     };
-    let mut costs = row![].spacing(6);
+    let mut costs = row![].spacing(SPACE_6);
     for c in Cost::ALL {
-        let b = button(text(c.label()).size(12)).on_press(msg(SettingsMsg::PickCost(c)));
+        let b = button(text(c.label()).size(TEXT_SMALL)).on_press(msg(SettingsMsg::PickCost(c)));
         costs = costs.push(if c == s.cost {
-            b.style(button::primary)
+            b.style(crate::theme::style::button(
+                crate::theme::style::ButtonKind::Primary,
+            ))
         } else {
-            b.style(button::secondary)
+            b.style(crate::theme::style::button(
+                crate::theme::style::ButtonKind::Secondary,
+            ))
         });
     }
     let current_cost = match s.stored_cost {
@@ -457,25 +481,27 @@ fn security(s: &SettingsScreen) -> Element<'_, Message> {
             "Confirm new",
             secret("repeat", &s.confirm, SettingsMsg::Confirm).into()
         ),
-        text("Key derivation cost (higher = slower unlock, harder to brute-force)").size(13),
+        text("Key derivation cost (higher = slower unlock, harder to brute-force)").size(TEXT_BODY),
         costs,
-        text(current_cost).size(12).style(text::secondary),
+        text(current_cost)
+            .size(TEXT_SMALL)
+            .style(crate::theme::style::text_secondary),
         text("Ctrl+S applies. Your data is not re-encrypted; only its key is re-wrapped.")
-            .size(12)
-            .style(text::secondary),
+            .size(TEXT_SMALL)
+            .style(crate::theme::style::text_secondary),
     ]
-    .spacing(8)
+    .spacing(SPACE_8)
     .into()
 }
 
 fn about<'a>(ctx: &ViewCtx<'a>) -> Element<'a, Message> {
     column![
-        text(format!("tern {}", env!("CARGO_PKG_VERSION"))).size(16),
-        text("Local-first, keyboard-first SSH client.").size(13),
-        text(format!("Data directory: {}", ctx.data_dir)).size(13),
-        text("License: MIT OR Apache-2.0").size(13),
+        text(format!("tern {}", env!("CARGO_PKG_VERSION"))).size(TEXT_HEADING),
+        text("Local-first, keyboard-first SSH client.").size(TEXT_BODY),
+        text(format!("Data directory: {}", ctx.data_dir)).size(TEXT_BODY),
+        text("License: MIT OR Apache-2.0").size(TEXT_BODY),
     ]
-    .spacing(6)
+    .spacing(SPACE_6)
     .into()
 }
 

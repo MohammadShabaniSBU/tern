@@ -2,8 +2,8 @@
 
 use std::collections::HashSet;
 
-use iced::widget::{checkbox, column, container, pick_list, row, text, text_input};
-use iced::{Color, Element, Fill, Theme};
+use iced::widget::{checkbox, column, pick_list, row, text, text_input};
+use iced::{Element, Fill};
 use rand::RngExt;
 use tern_core::{Identity, IdentityId, SshKeyMeta};
 
@@ -11,6 +11,7 @@ use crate::app::Message;
 use crate::auth::Sensitive;
 use crate::host_form::Choice;
 use crate::list::Item;
+use crate::theme::tokens::*;
 
 pub const LABEL_ID: &str = "if-label";
 const GENERATED_LEN: usize = 24;
@@ -194,8 +195,8 @@ impl IdentityForm {
 
 pub fn view(form: &IdentityForm) -> Element<'_, Message> {
     let field = |label: &'static str, input: Element<'static, Message>| {
-        row![text(label).size(13).width(100), input]
-            .spacing(8)
+        row![text(label).size(TEXT_BODY).width(100), input]
+            .spacing(SPACE_8)
             .align_y(iced::Center)
     };
     let hint = if form.is_edit() && form.had_password {
@@ -209,31 +210,34 @@ pub fn view(form: &IdentityForm) -> Element<'_, Message> {
         } else {
             "New identity"
         })
-        .size(18),
+        .size(TEXT_TITLE),
         field(
             "Label",
             text_input("", &form.label)
+                .style(crate::theme::style::input(false))
                 .id(LABEL_ID)
                 .on_input(|v| Message::IdentityEdit(IdField::Label, v))
                 .on_submit(Message::IdentitySave)
-                .padding(4)
+                .padding(SPACE_4)
                 .into()
         ),
         field(
             "Username",
             text_input("", &form.username)
+                .style(crate::theme::style::input(false))
                 .on_input(|v| Message::IdentityEdit(IdField::Username, v))
                 .on_submit(Message::IdentitySave)
-                .padding(4)
+                .padding(SPACE_4)
                 .into()
         ),
         field(
             "Password",
             text_input(hint, form.password.as_str())
+                .style(crate::theme::style::input(false))
                 .secure(!form.reveal)
                 .on_input(|v| Message::IdentityPassword(Sensitive::new(v)))
                 .on_submit(Message::IdentitySave)
-                .padding(4)
+                .padding(SPACE_4)
                 .into()
         ),
         field(
@@ -247,7 +251,7 @@ pub fn view(form: &IdentityForm) -> Element<'_, Message> {
             .into()
         ),
     ]
-    .spacing(8);
+    .spacing(SPACE_8);
     if form.is_edit() && form.had_password {
         body = body.push(
             checkbox(form.clear_password)
@@ -256,27 +260,17 @@ pub fn view(form: &IdentityForm) -> Element<'_, Message> {
         );
     }
     if let Some(e) = &form.error {
-        body = body.push(text(e.as_str()).size(13).style(text::danger));
+        body = body.push(
+            text(e.as_str())
+                .size(TEXT_BODY)
+                .style(crate::theme::style::text_error),
+        );
     }
     body = body.push(
         text("Ctrl+R reveal   Ctrl+G generate   Ctrl+Shift+C copy (clears in 30 s)   Ctrl+S save   Esc cancel")
-            .size(12),
+            .size(TEXT_SMALL),
     );
-    let dialog = container(body)
-        .padding(20)
-        .max_width(620)
-        .style(|theme: &Theme| {
-            let mut s = container::bordered_box(theme);
-            s.background = Some(theme.extended_palette().background.base.color.into());
-            s
-        });
-    container(dialog)
-        .center(Fill)
-        .style(|_| container::Style {
-            background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.55).into()),
-            ..container::Style::default()
-        })
-        .into()
+    crate::theme::widgets::dialog(body, 620.0)
 }
 
 #[cfg(test)]

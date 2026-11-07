@@ -8,6 +8,7 @@ use secrecy::SecretString;
 use zeroize::Zeroizing;
 
 use crate::app::Message;
+use crate::theme::tokens::*;
 
 pub const PASSWORD_ID: &str = "auth-password";
 pub const CONFIRM_ID: &str = "auth-confirm";
@@ -139,12 +140,13 @@ impl AuthForm {
 fn card<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
     container(
         container(content)
-            .padding(24)
-            .width(380)
-            .style(container::bordered_box),
+            .padding(SPACE_32)
+            .width(400)
+            .style(crate::theme::style::modal_card),
     )
     .center_x(Fill)
     .center_y(Fill)
+    .style(crate::theme::style::base)
     .into()
 }
 
@@ -152,7 +154,9 @@ fn status<'a>(form: &AuthForm, busy_label: &str) -> Element<'a, Message> {
     if form.busy {
         text(form.spinner(busy_label)).into()
     } else if let Some(error) = &form.error {
-        text(error.clone()).style(text::danger).into()
+        text(error.clone())
+            .style(crate::theme::style::text_error)
+            .into()
     } else {
         text("").into()
     }
@@ -160,10 +164,16 @@ fn status<'a>(form: &AuthForm, busy_label: &str) -> Element<'a, Message> {
 
 pub fn unlock_view(form: &AuthForm) -> Element<'_, Message> {
     let mut input = text_input("Master password", form.password.as_str())
+        .style(crate::theme::style::input(false))
         .id(PASSWORD_ID)
         .secure(true)
-        .padding(8);
-    let mut submit = button(text("Unlock").align_x(Center).width(Fill)).padding(8);
+        .size(TEXT_LABEL)
+        .padding([SPACE_8, SPACE_10]);
+    let mut submit = button(text("Unlock").align_x(Center).width(Fill))
+        .height(INPUT_H_LG)
+        .style(crate::theme::style::button(
+            crate::theme::style::ButtonKind::Primary,
+        ));
     if !form.busy {
         input = input
             .on_input(|s| Message::PasswordChanged(Sensitive::new(s)))
@@ -172,26 +182,38 @@ pub fn unlock_view(form: &AuthForm) -> Element<'_, Message> {
     }
     card(
         column![
-            text("tern").size(28),
-            text("Enter your master password to unlock."),
+            text("Unlock tern")
+                .size(TEXT_DISPLAY)
+                .font(crate::theme::UI_SEMIBOLD),
+            text("Enter your master password to unlock.")
+                .size(TEXT_BODY)
+                .style(crate::theme::style::text_secondary),
             input,
             submit,
             status(form, "Unlocking…"),
         ]
-        .spacing(12),
+        .spacing(SPACE_12),
     )
 }
 
 pub fn create_view(form: &AuthForm) -> Element<'_, Message> {
     let mut password = text_input("Master password", form.password.as_str())
+        .style(crate::theme::style::input(false))
         .id(PASSWORD_ID)
         .secure(true)
-        .padding(8);
+        .size(TEXT_LABEL)
+        .padding([SPACE_8, SPACE_10]);
     let mut confirm = text_input("Confirm master password", form.confirm.as_str())
+        .style(crate::theme::style::input(false))
         .id(CONFIRM_ID)
         .secure(true)
-        .padding(8);
-    let mut submit = button(text("Create vault").align_x(Center).width(Fill)).padding(8);
+        .size(TEXT_LABEL)
+        .padding([SPACE_8, SPACE_10]);
+    let mut submit = button(text("Create vault").align_x(Center).width(Fill))
+        .height(INPUT_H_LG)
+        .style(crate::theme::style::button(
+            crate::theme::style::ButtonKind::Primary,
+        ));
     if !form.busy {
         password = password
             .on_input(|s| Message::PasswordChanged(Sensitive::new(s)))
@@ -203,15 +225,17 @@ pub fn create_view(form: &AuthForm) -> Element<'_, Message> {
     }
     card(
         column![
-            text("tern").size(28),
+            text("Create your vault")
+                .size(TEXT_DISPLAY)
+                .font(crate::theme::UI_SEMIBOLD),
             text("Create a master password. It protects all stored passwords and keys."),
             password,
-            text(strength(form.password.as_str()).label()).size(14),
+            text(strength(form.password.as_str()).label()).size(TEXT_LABEL),
             confirm,
             submit,
             status(form, "Creating vault…"),
         ]
-        .spacing(12),
+        .spacing(SPACE_12),
     )
 }
 
@@ -219,10 +243,12 @@ pub fn create_view(form: &AuthForm) -> Element<'_, Message> {
 pub fn recovery_view<'a>() -> Element<'a, Message> {
     card(
         column![
-            text("Your vault is ready").size(24),
+            text("Your vault is ready")
+                .size(TEXT_DISPLAY)
+                .font(crate::theme::UI_SEMIBOLD),
             text("There is no password recovery.")
-                .style(text::danger)
-                .size(18),
+                .style(crate::theme::style::text_error)
+                .size(TEXT_TITLE),
             text(
                 "Your master password is never stored and cannot be reset. If you forget it, \
                  every saved password and key is permanently lost."
@@ -231,10 +257,10 @@ pub fn recovery_view<'a>() -> Element<'a, Message> {
                 "Once you have added hosts, export an encrypted backup and keep it somewhere safe."
             ),
             button(text("I understand — Enter").align_x(Center).width(Fill))
-                .padding(8)
+                .padding(SPACE_8)
                 .on_press(Message::Acknowledge),
         ]
-        .spacing(12),
+        .spacing(SPACE_12),
     )
 }
 

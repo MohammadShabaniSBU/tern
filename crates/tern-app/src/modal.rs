@@ -1,12 +1,13 @@
 //! Modal stack and confirm dialogs (S2-T06).
 
-use iced::widget::{column, container, row, space, text};
-use iced::{Center, Color, Element, Fill, Theme};
+use iced::Element;
+use iced::widget::{column, row, space, text};
 
 use crate::action::ModeMask;
 use crate::app::Message;
 use crate::cheatsheet;
 use crate::keymap::Keymap;
+use crate::theme::tokens::*;
 
 /// What happens when a confirm dialog is accepted.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,82 +87,61 @@ fn host_key_view<'a>(
     fingerprint: &'a str,
     changed_from: Option<&'a str>,
 ) -> Element<'a, Message> {
-    let mut body = column![].spacing(8);
+    let mut body = column![].spacing(SPACE_8);
     if let Some(old) = changed_from {
         body = body
             .push(
                 text("WARNING: HOST KEY HAS CHANGED")
-                    .size(20)
-                    .style(text::danger),
+                    .size(TEXT_DISPLAY)
+                    .style(crate::theme::style::text_error),
             )
             .push(
                 text(format!(
                     "The key for {host}:{port} is different from the one you trusted. \
                      Someone may be intercepting the connection, or the server was reinstalled."
                 ))
-                .size(14),
+                .size(TEXT_LABEL),
             )
-            .push(text(format!("Old: {old}")).size(13))
-            .push(text(format!("New: {fingerprint}  ({key_type})")).size(13))
+            .push(text(format!("Old: {old}")).size(TEXT_BODY))
+            .push(text(format!("New: {fingerprint}  ({key_type})")).size(TEXT_BODY))
             .push(space().height(8))
-            .push(text("[n] / Esc  Abort (recommended)").size(13))
-            .push(text("[Shift+R]  Replace the stored key and connect").size(13));
+            .push(text("[n] / Esc  Abort (recommended)").size(TEXT_BODY))
+            .push(text("[Shift+R]  Replace the stored key and connect").size(TEXT_BODY));
     } else {
         body = body
-            .push(text("Unknown host").size(18))
-            .push(text(format!("First connection to {host}:{port}.")).size(14))
-            .push(text(format!("{key_type}  {fingerprint}")).size(13))
+            .push(text("Unknown host").size(TEXT_TITLE))
+            .push(text(format!("First connection to {host}:{port}.")).size(TEXT_LABEL))
+            .push(text(format!("{key_type}  {fingerprint}")).size(TEXT_BODY))
             .push(space().height(8))
-            .push(text("[y] / Enter  Trust and save").size(13))
-            .push(text("[n] / Esc  Abort").size(13));
+            .push(text("[y] / Enter  Trust and save").size(TEXT_BODY))
+            .push(text("[n] / Esc  Abort").size(TEXT_BODY));
     }
-    let dialog = container(body)
-        .padding(20)
-        .max_width(560)
-        .style(|theme: &Theme| {
-            let mut s = container::bordered_box(theme);
-            s.background = Some(theme.extended_palette().background.base.color.into());
-            s
-        });
-    container(dialog)
-        .center(Fill)
-        .align_x(Center)
-        .style(|_| container::Style {
-            background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.55).into()),
-            ..container::Style::default()
-        })
-        .into()
+    crate::theme::widgets::dialog(body, 560.0)
 }
 
 fn confirm_view<'a>(title: &'a str, body: &'a str) -> Element<'a, Message> {
-    let dialog = container(
+    crate::theme::widgets::dialog(
         column![
-            text(title).size(18),
-            text(body).size(14),
-            space().height(8),
+            text(title)
+                .size(TEXT_HEADING)
+                .font(crate::theme::UI_SEMIBOLD),
+            text(body)
+                .size(TEXT_BODY)
+                .style(crate::theme::style::text_secondary),
+            space().height(SPACE_8),
             row![
-                text("[y] / Enter  Yes").size(13),
-                text("[n] / Esc  No").size(13)
+                text("y / Enter  Yes")
+                    .size(TEXT_SMALL)
+                    .font(crate::theme::MONO),
+                text("n / Esc  No")
+                    .size(TEXT_SMALL)
+                    .font(crate::theme::MONO),
             ]
-            .spacing(24),
+            .spacing(SPACE_24),
         ]
-        .spacing(8),
+        .spacing(SPACE_8),
+        crate::theme::tokens::CONFIRM_W,
     )
-    .padding(20)
-    .max_width(420)
-    .style(|theme: &Theme| {
-        let mut s = container::bordered_box(theme);
-        s.background = Some(theme.extended_palette().background.base.color.into());
-        s
-    });
-    container(dialog)
-        .center(Fill)
-        .align_x(Center)
-        .style(|_| container::Style {
-            background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.55).into()),
-            ..container::Style::default()
-        })
-        .into()
 }
 
 #[cfg(test)]

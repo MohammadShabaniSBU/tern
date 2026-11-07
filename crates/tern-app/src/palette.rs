@@ -4,13 +4,15 @@
 //! `State::dispatch`, same as the keymap.
 
 use iced::widget::{column, container, row, space, text, text_input};
-use iced::{Color, Element, Fill, Theme};
+use iced::{Element, Fill, Theme};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 
 use crate::action::{Action, ModeMask};
 use crate::app::Message;
 use crate::keymap::Keymap;
+use crate::theme::tokens::*;
+use crate::theme::{self, style};
 
 /// Settings key holding the JSON array of recently used entries.
 pub const RECENT_SETTING: &str = "palette_recent";
@@ -306,59 +308,75 @@ pub fn pretty_keys(keys: &str) -> String {
 }
 
 pub fn view(p: &Palette) -> Element<'_, Message> {
-    let input = text_input("Type a command or host…", &p.query)
-        .id(PALETTE_ID)
-        .on_input(Message::PaletteQueryChanged)
-        .padding(8);
+    let input = row![
+        text(">")
+            .size(TEXT_LABEL)
+            .font(theme::MONO_SEMIBOLD)
+            .style(style::text_color(|c| c.mode_palette)),
+        text_input("Type a command or host…", &p.query)
+            .id(PALETTE_ID)
+            .on_input(Message::PaletteQueryChanged)
+            .size(TEXT_LABEL)
+            .padding([SPACE_8, SPACE_8])
+            .style(|t: &Theme, _| {
+                let c = theme::palette(t);
+                iced::widget::text_input::Style {
+                    background: iced::Color::TRANSPARENT.into(),
+                    border: iced::Border::default(),
+                    icon: c.text_muted,
+                    placeholder: c.text_faint,
+                    value: c.text_primary,
+                    selection: c.selection_term,
+                }
+            }),
+    ]
+    .spacing(SPACE_6)
+    .align_y(iced::Center)
+    .padding([0.0, SPACE_8]);
 
-    let mut list = column![].spacing(2);
+    let mut list = column![].spacing(SPACE_2);
     for (i, entry) in p.results().enumerate() {
         let selected = i == p.selected;
         list = list.push(
             container(
                 row![
-                    text(entry.title.as_str()).size(14),
+                    text(entry.title.as_str())
+                        .size(TEXT_LABEL)
+                        .style(style::text_primary),
                     space().width(Fill),
-                    text(entry.keys.as_str()).size(12),
+                    text(entry.keys.as_str())
+                        .size(MONO_KBD)
+                        .font(theme::MONO)
+                        .style(style::text_muted),
                 ]
-                .padding([4, 8]),
+                .align_y(iced::Center),
             )
             .width(Fill)
-            .style(move |theme: &Theme| {
-                if selected {
-                    let pal = theme.extended_palette();
-                    container::Style {
-                        background: Some(pal.primary.weak.color.into()),
-                        text_color: Some(pal.primary.weak.text),
-                        ..container::Style::default()
-                    }
-                } else {
-                    container::Style::default()
-                }
-            }),
+            .height(PALETTE_ITEM_H)
+            .padding([0.0, SPACE_10])
+            .align_y(iced::Center)
+            .style(style::palette_item(selected)),
         );
     }
     if p.results().next().is_none() {
-        list = list.push(text("No matches").size(14));
+        list = list.push(
+            container(text("No matches").size(TEXT_LABEL).style(style::text_muted))
+                .padding([SPACE_8, SPACE_10]),
+        );
     }
 
-    let panel = container(column![input, list].spacing(8))
-        .padding(12)
-        .width(560)
-        .style(|theme: &Theme| {
-            let mut s = container::bordered_box(theme);
-            s.background = Some(theme.extended_palette().background.base.color.into());
-            s
-        });
-    container(panel)
-        .center_x(Fill)
-        .padding(iced::Padding::ZERO.top(80))
-        .height(Fill)
-        .style(|_| container::Style {
-            background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.45).into()),
-            ..container::Style::default()
-        })
-        .into()
+    crate::theme::widgets::top_dialog(
+        column![
+            input,
+            container(space())
+                .height(1)
+                .width(Fill)
+                .style(style::divider),
+            list
+        ]
+        .spacing(SPACE_6),
+        PALETTE_W,
+    )
 }
 
 #[cfg(test)]

@@ -1,8 +1,8 @@
 //! One dialog for all Sprint 7 import/export flows (backup, plaintext, ssh_config, key scan,
 //! scheduled-backup settings). Keyboard-first: text fields only, Enter / Ctrl+S to continue.
 
-use iced::widget::{column, container, row, text, text_input};
-use iced::{Color, Element, Fill, Theme};
+use iced::Element;
+use iced::widget::{column, row, text, text_input};
 use tern_io::bundle::Payload;
 use tern_io::keyscan::KeyCandidate;
 use tern_io::merge::Counts;
@@ -10,6 +10,7 @@ use tern_io::ssh_config::ParsedHost;
 
 use crate::app::Message;
 use crate::auth::Sensitive;
+use crate::theme::tokens::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IoKind {
@@ -129,8 +130,8 @@ pub fn parse_selection(s: &str, len: usize) -> Result<Vec<usize>, String> {
 }
 
 fn field<'a>(label: &'static str, input: Element<'a, Message>) -> Element<'a, Message> {
-    row![text(label).size(13).width(120), input]
-        .spacing(8)
+    row![text(label).size(TEXT_BODY).width(120), input]
+        .spacing(SPACE_8)
         .align_y(iced::Center)
         .into()
 }
@@ -141,9 +142,10 @@ fn input<'a>(
     on_input: fn(String) -> Message,
 ) -> text_input::TextInput<'a, Message> {
     text_input(placeholder, value)
+        .style(crate::theme::style::input(false))
         .on_input(on_input)
         .on_submit(Message::IoSubmit)
-        .padding(4)
+        .padding(SPACE_4)
 }
 
 fn secret<'a>(
@@ -152,14 +154,15 @@ fn secret<'a>(
     on_input: fn(Sensitive) -> Message,
 ) -> text_input::TextInput<'a, Message> {
     text_input(placeholder, value.as_str())
+        .style(crate::theme::style::input(false))
         .secure(true)
         .on_input(move |v| on_input(Sensitive::new(v)))
         .on_submit(Message::IoSubmit)
-        .padding(4)
+        .padding(SPACE_4)
 }
 
 pub fn view(form: &IoForm) -> Element<'_, Message> {
-    let mut body = column![text(form.title()).size(18)].spacing(8);
+    let mut body = column![text(form.title()).size(TEXT_TITLE)].spacing(SPACE_8);
     let hint;
     match (&form.preview, form.kind) {
         (Some(Preview::Backup { counts, .. }), _) => {
@@ -168,7 +171,7 @@ pub fn view(form: &IoForm) -> Element<'_, Message> {
                     "{} new, {} conflicting, {} identical",
                     counts.new, counts.conflicting, counts.identical
                 ))
-                .size(14),
+                .size(TEXT_LABEL),
             );
             body = body.push(field(
                 "On conflict",
@@ -190,7 +193,7 @@ pub fn view(form: &IoForm) -> Element<'_, Message> {
                         .map(|j| format!("  via {j}"))
                         .unwrap_or_default()
                 );
-                body = body.push(text(line).size(13).font(crate::app::MONO));
+                body = body.push(text(line).size(TEXT_BODY).font(crate::app::MONO));
             }
             body = body.push(field(
                 "Import",
@@ -213,7 +216,7 @@ pub fn view(form: &IoForm) -> Element<'_, Message> {
             for (i, k) in keys.iter().enumerate() {
                 body = body.push(
                     text(format!("{:>3}. {}", i + 1, k.name))
-                        .size(13)
+                        .size(TEXT_BODY)
                         .font(crate::app::MONO),
                 );
             }
@@ -234,7 +237,7 @@ pub fn view(form: &IoForm) -> Element<'_, Message> {
                 IoKind::AutoBackup => {
                     body = body.push(
                         text("Enter the backup password to write today's scheduled backup.")
-                            .size(13),
+                            .size(TEXT_BODY),
                     );
                     body = body.push(field(
                         "Password",
@@ -294,8 +297,8 @@ pub fn view(form: &IoForm) -> Element<'_, Message> {
                     if kind == IoKind::ExportPlain {
                         body = body.push(
                             text("WARNING: plaintext secrets are readable by anyone with the file. Leave blank to exclude secrets, or type INCLUDE SECRETS.")
-                                .size(12)
-                                .style(text::danger),
+                                .size(TEXT_SMALL)
+                                .style(crate::theme::style::text_error),
                         );
                         body = body.push(field(
                             "Secrets",
@@ -316,30 +319,21 @@ pub fn view(form: &IoForm) -> Element<'_, Message> {
         }
     }
     if form.busy {
-        body = body.push(text("Working…").size(13));
+        body = body.push(text("Working…").size(TEXT_BODY));
     }
     if let Some(e) = &form.error {
-        body = body.push(text(e.as_str()).size(13).style(text::danger));
+        body = body.push(
+            text(e.as_str())
+                .size(TEXT_BODY)
+                .style(crate::theme::style::text_error),
+        );
     }
     if !hint.is_empty() {
-        body = body.push(text(hint).size(12));
+        body = body.push(text(hint).size(TEXT_SMALL));
     }
-    body = body.push(text("Enter / Ctrl+S continue   Tab next field   Esc cancel").size(12));
-    let dialog = container(body)
-        .padding(20)
-        .max_width(640)
-        .style(|theme: &Theme| {
-            let mut s = container::bordered_box(theme);
-            s.background = Some(theme.extended_palette().background.base.color.into());
-            s
-        });
-    container(dialog)
-        .center(Fill)
-        .style(|_| container::Style {
-            background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.55).into()),
-            ..container::Style::default()
-        })
-        .into()
+    body =
+        body.push(text("Enter / Ctrl+S continue   Tab next field   Esc cancel").size(TEXT_SMALL));
+    crate::theme::widgets::dialog(body, 640.0)
 }
 
 #[cfg(test)]

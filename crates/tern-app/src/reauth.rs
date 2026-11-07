@@ -2,12 +2,13 @@
 
 use std::time::{Duration, Instant};
 
-use iced::widget::{column, container, text, text_input};
-use iced::{Color, Element, Fill, Theme};
+use iced::Element;
+use iced::widget::{column, text, text_input};
 use tern_core::{IdentityId, KeyId};
 
 use crate::app::Message;
 use crate::auth::Sensitive;
+use crate::theme::tokens::*;
 
 pub const REAUTH_ID: &str = "reauth-input";
 pub const DEFAULT_MINUTES: u64 = 5;
@@ -90,38 +91,29 @@ impl ReauthPrompt {
 
 pub fn view(p: &ReauthPrompt) -> Element<'_, Message> {
     let mut body = column![
-        text("Confirm master password").size(18),
-        text(format!("Needed to {}.", p.what())).size(13),
+        text("Confirm master password").size(TEXT_TITLE),
+        text(format!("Needed to {}.", p.what())).size(TEXT_BODY),
         text_input("Master password", p.password.as_str())
+            .style(crate::theme::style::input(false))
             .id(REAUTH_ID)
             .secure(true)
             .on_input(|v| Message::ReauthPassword(Sensitive::new(v)))
             .on_submit(Message::ReauthSubmit)
-            .padding(4),
+            .padding(SPACE_4),
     ]
-    .spacing(8);
+    .spacing(SPACE_8);
     if p.busy {
-        body = body.push(text("Checking…").size(13));
+        body = body.push(text("Checking…").size(TEXT_BODY));
     }
     if let Some(e) = &p.error {
-        body = body.push(text(e.as_str()).size(13).style(text::danger));
+        body = body.push(
+            text(e.as_str())
+                .size(TEXT_BODY)
+                .style(crate::theme::style::text_error),
+        );
     }
-    body = body.push(text("Enter confirm   Esc cancel").size(12));
-    let dialog = container(body)
-        .padding(20)
-        .max_width(420)
-        .style(|theme: &Theme| {
-            let mut s = container::bordered_box(theme);
-            s.background = Some(theme.extended_palette().background.base.color.into());
-            s
-        });
-    container(dialog)
-        .center(Fill)
-        .style(|_| container::Style {
-            background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.55).into()),
-            ..container::Style::default()
-        })
-        .into()
+    body = body.push(text("Enter confirm   Esc cancel").size(TEXT_SMALL));
+    crate::theme::widgets::dialog(body, 420.0)
 }
 
 #[cfg(test)]
