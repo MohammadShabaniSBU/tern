@@ -1,5 +1,5 @@
 //! Design-system theme: colour palette tokens, size tokens, fonts and shared widget styles.
-#![allow(dead_code)] // tokens/styles are adopted screen by screen; tighten when migration is done
+#![allow(dead_code)] // design-system library: parts (failed rows, focus glow, footer) are used as screens adopt them
 //! Views refer to tokens by name (`palette(theme).accent`, `tokens::SPACE_8`, `style::button(..)`).
 
 pub mod colors;

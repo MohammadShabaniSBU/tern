@@ -52,7 +52,12 @@ pub fn view<'a>(keymap: &Keymap, mode: ModeMask) -> Element<'a, Message> {
     .spacing(SPACE_4);
     for (category, rows) in sections(keymap, mode) {
         body = body.push(space().height(10));
-        body = body.push(text(category.label()).size(15).style(text::primary));
+        body = body.push(
+            text(category.label().to_uppercase())
+                .size(TEXT_CAPTION)
+                .font(crate::theme::UI_SEMIBOLD)
+                .style(crate::theme::style::text_muted),
+        );
         for row in rows {
             let keys = if row.keys.is_empty() {
                 "unbound".to_owned()
