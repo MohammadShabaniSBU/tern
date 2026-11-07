@@ -26,7 +26,7 @@
 tern/
 ├── Cargo.toml              # [workspace]
 ├── crates/
-│   ├── tern-core/          # Domain types (Host, Identity, SshKey, Tunnel, Group), no I/O
+│   ├── tern-core/          # Domain types (Host, SshKey, Tunnel, Group), no I/O
 │   ├── tern-vault/         # KDF, AEAD, data-key wrapping, Secret<T> helpers
 │   ├── tern-store/         # SQLite schema, migrations, repositories
 │   ├── tern-ssh/           # russh client wrapper, auth, known-hosts, tunnels
@@ -59,17 +59,13 @@ ssh_keys (
   created_at TEXT, updated_at TEXT
 )
 
-identities (
-  id TEXT PK, label TEXT, username TEXT,
-  password_enc BLOB NULL,
-  ssh_key_id TEXT NULL REFERENCES ssh_keys(id) ON DELETE SET NULL,
-  created_at TEXT, updated_at TEXT
-)
-
 hosts (
   id TEXT PK, label TEXT, hostname TEXT, port INT DEFAULT 22,
-  username TEXT NULL,              -- overrides identity username
-  identity_id TEXT NULL REFERENCES identities(id) ON DELETE SET NULL,
+  username TEXT NULL,
+  auth_kind TEXT,                  -- 'ask' | 'password' | 'key'
+  ssh_key_id TEXT NULL REFERENCES ssh_keys(id) ON DELETE SET NULL,
+  password_enc BLOB NULL,          -- AAD hosts:password_enc:<id>
+  password_aad TEXT NULL,          -- legacy AAD of a password migrated from an identity
   group_id TEXT NULL REFERENCES groups(id) ON DELETE SET NULL,
   jump_host_id TEXT NULL REFERENCES hosts(id) ON DELETE SET NULL,
   tags TEXT,                       -- JSON array

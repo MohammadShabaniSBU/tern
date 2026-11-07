@@ -8,7 +8,6 @@
 
 mod groups;
 mod hosts;
-mod identities;
 mod keys;
 mod known_hosts;
 mod settings;
@@ -25,7 +24,6 @@ use crate::{Error, Result};
 
 pub use groups::GroupRepo;
 pub use hosts::HostRepo;
-pub use identities::IdentityRepo;
 pub use keys::KeyRepo;
 pub use known_hosts::KnownHostRepo;
 pub use settings::SettingsRepo;

@@ -260,7 +260,7 @@ pub fn parse_text(
 pub struct Built {
     pub hosts: Vec<Host>,
     pub tunnels: Vec<Tunnel>,
-    /// `(host id, resolved key file path)` for the caller to import and attach as an identity.
+    /// `(host id, resolved key file path)` for the caller to import and attach as the host key.
     pub key_files: Vec<(HostId, PathBuf)>,
     pub warnings: Vec<String>,
 }

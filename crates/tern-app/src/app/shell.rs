@@ -99,7 +99,6 @@ impl State {
             let goto = match section {
                 Section::Hosts => Action::GoHosts,
                 Section::Keys => Action::GoKeys,
-                Section::Identities => Action::GoIdentities,
                 Section::Tunnels => Action::GoTunnels,
             };
             let count = self.lists[n].len_leaves();
@@ -253,7 +252,6 @@ impl State {
                 match self.section {
                     Section::Hosts => "New host",
                     Section::Keys => "New key",
-                    Section::Identities => "New identity",
                     Section::Tunnels => "New tunnel",
                 },
                 "n",
@@ -310,21 +308,18 @@ impl State {
             Some(item) if item.id.is_some() => {
                 let id = item.id.as_deref().unwrap_or_default();
                 let found = match self.section {
-                    Section::Hosts => self.host_data.host_detail(id),
+                    Section::Hosts => self.host_data.host_detail(id).map(|mut t| {
+                        if let Some((rid, pw)) = &self.revealed
+                            && rid == id
+                        {
+                            t.push_str(&format!(
+                                "\n\nRevealed password (Esc hides):\n{}",
+                                pw.as_str()
+                            ));
+                        }
+                        t
+                    }),
                     Section::Keys => self.keys_data.detail(id),
-                    Section::Identities => {
-                        self.ids_data.detail(id, &self.keys_data.keys).map(|mut t| {
-                            if let Some((rid, pw)) = &self.revealed
-                                && rid == id
-                            {
-                                t.push_str(&format!(
-                                    "\n\nRevealed password (Esc hides):\n{}",
-                                    pw.as_str()
-                                ));
-                            }
-                            t
-                        })
-                    }
                     Section::Tunnels => self.tunnels_data.detail(id),
                 };
                 found.unwrap_or_else(|| item.label.clone())

@@ -1,32 +1,49 @@
 use rusqlite::{Connection, OptionalExtension, Row, params};
-use tern_core::{Host, HostId};
+use secrecy::SecretString;
+use tern_core::{Host, HostAuth, HostId, KeyId};
+use tern_vault::Vault;
 
-use super::{NOW, parse_col, parse_opt_col, require_changed};
+use super::{NOW, open_secret, parse_col, parse_opt_col, require_changed, seal_secret};
 use crate::{Error, Result};
 
 pub struct HostRepo<'c> {
     conn: &'c Connection,
 }
 
-const COLS: &str = "id, label, hostname, port, username, identity_id, group_id, jump_host_id, \
-                    tags, notes, keepalive_secs";
+const COLS: &str = "id, label, hostname, port, username, auth_kind, ssh_key_id, group_id, \
+                    jump_host_id, tags, notes, keepalive_secs";
+
+fn auth_columns(auth: HostAuth) -> (&'static str, Option<String>) {
+    match auth {
+        HostAuth::Ask => ("ask", None),
+        HostAuth::Password => ("password", None),
+        HostAuth::Key(k) => ("key", Some(k.to_string())),
+    }
+}
 
 fn from_row(row: &Row<'_>) -> rusqlite::Result<Host> {
-    let tags: String = row.get(8)?;
+    let tags: String = row.get(9)?;
+    let kind: String = row.get(5)?;
+    let key: Option<KeyId> = parse_opt_col(6, row.get(6)?)?;
+    let auth = match (kind.as_str(), key) {
+        ("key", Some(k)) => HostAuth::Key(k),
+        ("password", _) => HostAuth::Password,
+        _ => HostAuth::Ask,
+    };
     Ok(Host {
         id: parse_col(0, &row.get::<_, String>(0)?)?,
         label: row.get(1)?,
         hostname: row.get(2)?,
         port: row.get(3)?,
         username: row.get(4)?,
-        identity_id: parse_opt_col(5, row.get(5)?)?,
-        group_id: parse_opt_col(6, row.get(6)?)?,
-        jump_host_id: parse_opt_col(7, row.get(7)?)?,
+        auth,
+        group_id: parse_opt_col(7, row.get(7)?)?,
+        jump_host_id: parse_opt_col(8, row.get(8)?)?,
         tags: serde_json::from_str(&tags).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(8, rusqlite::types::Type::Text, Box::new(e))
+            rusqlite::Error::FromSqlConversionFailure(9, rusqlite::types::Type::Text, Box::new(e))
         })?,
-        notes: row.get(9)?,
-        keepalive_secs: row.get(10)?,
+        notes: row.get(10)?,
+        keepalive_secs: row.get(11)?,
     })
 }
 
@@ -56,10 +73,11 @@ impl<'c> HostRepo<'c> {
 
     pub fn insert(&self, host: &Host) -> Result<()> {
         host.validate()?;
+        let (auth_kind, auth_key) = auth_columns(host.auth);
         self.conn.execute(
             &format!(
                 "INSERT INTO hosts ({COLS}, created_at, updated_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, {NOW}, {NOW})"
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, {NOW}, {NOW})"
             ),
             params![
                 host.id.to_string(),
@@ -67,7 +85,8 @@ impl<'c> HostRepo<'c> {
                 host.hostname,
                 host.port,
                 host.username,
-                host.identity_id.map(|i| i.to_string()),
+                auth_kind,
+                auth_key,
                 host.group_id.map(|g| g.to_string()),
                 host.jump_host_id.map(|j| j.to_string()),
                 serde_json::to_string(&host.tags).map_err(|e| Error::Corrupt(e.to_string()))?,
@@ -80,11 +99,12 @@ impl<'c> HostRepo<'c> {
 
     pub fn update(&self, host: &Host) -> Result<()> {
         host.validate()?;
+        let (auth_kind, auth_key) = auth_columns(host.auth);
         let n = self.conn.execute(
             &format!(
                 "UPDATE hosts SET label = ?2, hostname = ?3, port = ?4, username = ?5, \
-                 identity_id = ?6, group_id = ?7, jump_host_id = ?8, tags = ?9, notes = ?10, \
-                 keepalive_secs = ?11, updated_at = {NOW} WHERE id = ?1"
+                 auth_kind = ?6, ssh_key_id = ?7, group_id = ?8, jump_host_id = ?9, tags = ?10, \
+                 notes = ?11, keepalive_secs = ?12, updated_at = {NOW} WHERE id = ?1"
             ),
             params![
                 host.id.to_string(),
@@ -92,7 +112,8 @@ impl<'c> HostRepo<'c> {
                 host.hostname,
                 host.port,
                 host.username,
-                host.identity_id.map(|i| i.to_string()),
+                auth_kind,
+                auth_key,
                 host.group_id.map(|g| g.to_string()),
                 host.jump_host_id.map(|j| j.to_string()),
                 serde_json::to_string(&host.tags).map_err(|e| Error::Corrupt(e.to_string()))?,
@@ -101,6 +122,80 @@ impl<'c> HostRepo<'c> {
             ],
         )?;
         require_changed(n, "host")
+    }
+
+    /// Set or clear (`None`) the stored password. Always sealed for this host.
+    pub fn set_password(
+        &self,
+        id: HostId,
+        password: Option<&SecretString>,
+        vault: &Vault,
+    ) -> Result<()> {
+        let enc = password
+            .map(|p| seal_secret(vault, p, "hosts", "password_enc", &id))
+            .transpose()?;
+        let n = self.conn.execute(
+            &format!(
+                "UPDATE hosts SET password_enc = ?2, password_aad = NULL, updated_at = {NOW} \
+                 WHERE id = ?1"
+            ),
+            params![id.to_string(), enc],
+        )?;
+        require_changed(n, "host")
+    }
+
+    pub fn has_password(&self, id: HostId) -> Result<bool> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT password_enc IS NOT NULL FROM hosts WHERE id = ?1",
+                [id.to_string()],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(false))
+    }
+
+    /// Explicitly decrypt the stored password.
+    pub fn get_password(&self, id: HostId, vault: &Vault) -> Result<Option<SecretString>> {
+        let row: Option<(Option<Vec<u8>>, Option<String>)> = self
+            .conn
+            .query_row(
+                "SELECT password_enc, password_aad FROM hosts WHERE id = ?1",
+                [id.to_string()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((Some(blob), legacy_aad)) = row else {
+            return Ok(None);
+        };
+        match legacy_aad {
+            // Copied from an identity by migration 002; bound to the identity's AAD.
+            Some(aad) => {
+                let plain = vault.open(&blob, aad.as_bytes())?;
+                use secrecy::ExposeSecret;
+                let text = std::str::from_utf8(plain.expose_secret())
+                    .map_err(|_| Error::Corrupt("hosts.password_enc is not valid UTF-8".into()))?;
+                Ok(Some(SecretString::from(text.to_owned())))
+            }
+            None => Ok(Some(open_secret(
+                vault,
+                &blob,
+                "hosts",
+                "password_enc",
+                &id,
+            )?)),
+        }
+    }
+
+    /// Number of hosts that authenticate with `key`.
+    pub fn count_using_key(&self, key: KeyId) -> Result<usize> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM hosts WHERE ssh_key_id = ?1",
+            [key.to_string()],
+            |r| r.get(0),
+        )?;
+        Ok(usize::try_from(n).unwrap_or(0))
     }
 
     pub fn delete(&self, id: HostId) -> Result<bool> {

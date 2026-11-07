@@ -6,7 +6,6 @@ mod cheatsheet;
 mod crash;
 mod host_form;
 mod hosts_view;
-mod identity_form;
 mod io_form;
 mod key_form;
 mod keymap;

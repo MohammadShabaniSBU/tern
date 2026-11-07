@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use iced::Task;
 use secrecy::SecretString;
-use tern_core::{HostId, Identity, IdentityId, KeyId, SshKeyMeta};
+use tern_core::{HostAuth, HostId, KeyId, SshKeyMeta};
 use tern_io::bundle::Payload;
 use tern_io::merge::{self, Scope, Strategy};
 use tern_store::Store;
@@ -73,10 +73,9 @@ async fn encrypt_to(payload: Payload, password: SecretString) -> Result<Vec<u8>,
 
 fn counts_text(p: &Payload) -> String {
     format!(
-        "{} hosts, {} keys, {} identities, {} tunnels",
+        "{} hosts, {} keys, {} tunnels",
         p.hosts.len(),
         p.ssh_keys.len(),
-        p.identities.len(),
         p.tunnels.len()
     )
 }
@@ -201,7 +200,6 @@ impl State {
                 Task::batch([
                     self.reload_hosts(),
                     self.reload_keys(),
-                    self.reload_identities(),
                     self.reload_tunnels(),
                 ])
             }
@@ -496,7 +494,7 @@ impl State {
     }
 }
 
-/// Import selected ssh_config entries (hosts, tunnels, jump hosts, IdentityFiles) atomically.
+/// Import selected ssh_config entries (hosts, tunnels, jump hosts, IdentityFiles as keys) atomically.
 async fn import_ssh_hosts(
     store: Store,
     chosen: Vec<tern_io::ssh_config::ParsedHost>,
@@ -555,7 +553,7 @@ async fn import_ssh_hosts(
         .query(move |db| {
             let vault = db.vault()?;
             let tx = db.conn().unchecked_transaction()?;
-            let mut identity_for: HashMap<PathBuf, IdentityId> = HashMap::new();
+            let mut key_for: HashMap<PathBuf, KeyId> = HashMap::new();
             let mut hosts = built.hosts;
             for (path, (meta, material)) in by_path {
                 db.keys().insert(
@@ -564,24 +562,13 @@ async fn import_ssh_hosts(
                     material.passphrase.as_ref(),
                     vault,
                 )?;
-                let user = hosts
-                    .iter()
-                    .find(|h| host_key.get(&h.id) == Some(&path))
-                    .and_then(|h| h.username.clone())
-                    .unwrap_or_else(|| "root".into());
-                let identity = Identity {
-                    id: IdentityId::new(),
-                    label: meta.label.clone(),
-                    username: user,
-                    ssh_key_id: Some(meta.id),
-                };
-                db.identities().insert(&identity, None, vault)?;
-                identity_for.insert(path, identity.id);
+                key_for.insert(path, meta.id);
             }
             let mut jumps = Vec::new();
             for h in &mut hosts {
-                if let Some(p) = host_key.get(&h.id) {
-                    h.identity_id = identity_for.get(p).copied();
+                if let Some(k) = host_key.get(&h.id).and_then(|p| key_for.get(p)) {
+                    h.auth = HostAuth::Key(*k);
+                    h.username.get_or_insert_with(|| "root".into());
                 }
                 if let Some(j) = h.jump_host_id.take() {
                     jumps.push((h.id, j));

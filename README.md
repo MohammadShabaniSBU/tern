@@ -4,7 +4,7 @@ A personal, local-first, keyboard-first SSH client written in Rust with [iced](h
 No server, no account, no sync: everything lives in one SQLite file, and secrets (passwords, private
 keys, passphrases) are encrypted at rest behind a master password.
 
-Features: host/group/tag manager, identities and SSH keys (generate, import, export), tabbed
+Features: host/group/tag manager, SSH keys (generate, import, export), tabbed
 terminals (alacritty_terminal emulation, search, copy mode), jump hosts (ProxyJump chains),
 local/remote/dynamic (SOCKS5) port forwarding, import/export (encrypted backup, `~/.ssh/config`),
 idle auto-lock, and a command palette for everything.
@@ -31,8 +31,8 @@ Windows packages are not provided.
 
 1. Choose a **master password** and confirm it. tern shows a recovery warning once; there is no
    password reset, so keep the password safe (a password manager is a good home for it).
-2. Add a host with `a` (or `Ctrl+K` → "Add"), optionally with an identity (username + password
-   and/or key) and a jump host.
+2. Add a host with `a` (or `Ctrl+K` → "Add"), with a username and either a password, a stored key or
+   "ask each time", and optionally a jump host.
 3. `Enter` connects. `Ctrl+K` opens the command palette, `F1` / `?` the cheat sheet,
    `Ctrl+,` the settings.
 

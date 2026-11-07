@@ -50,7 +50,7 @@ A remote shell needs `Ctrl+A`, `Ctrl+W`, `Ctrl+K`, etc. So while a terminal is f
 | `r` (Normal, disconnected) | Reconnect |
 | `Ctrl+Shift+W` | Close the tab (asks first while connected) |
 
-### Normal mode — lists (hosts, keys, identities, tunnels)
+### Normal mode — lists (hosts, keys, tunnels)
 
 | Keys | Action |
 |---|---|
@@ -63,7 +63,7 @@ A remote shell needs `Ctrl+A`, `Ctrl+W`, `Ctrl+K`, etc. So while a terminal is f
 | `e` | Edit selected |
 | `d d` | Delete selected (with confirm) |
 | `y` | Duplicate selected |
-| `1`..`4` | Switch section: Hosts, Keys, Identities, Tunnels |
+| `1`..`3` | Switch section: Hosts, Keys, Tunnels |
 | `t` (on a host) | Start/stop all of its tunnels (on a tunnel: toggle it) |
 | `Enter` (on a tunnel) | Start/stop the tunnel |
 

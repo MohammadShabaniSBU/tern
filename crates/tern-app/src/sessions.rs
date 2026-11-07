@@ -11,7 +11,7 @@ use iced::widget::canvas::Cache;
 use iced::widget::{column, container, row, space, text, text_input};
 use iced::{Element, Fill};
 use secrecy::SecretString;
-use tern_core::{HostId, Identity};
+use tern_core::{HostAuth, HostId};
 use tern_ssh::known_hosts::BoxFuture;
 use tern_ssh::{
     AuthPromptItem, ConnectParams, HostKeyInfo, KeyAuth, KnownHostsStore, SessionEvent,
@@ -273,37 +273,30 @@ async fn resolve_host(
         .await
         .map_err(|e| e.to_string())?
         .ok_or("That host no longer exists")?;
-    let identity: Option<Identity> = match host.identity_id {
-        Some(iid) => store
-            .list_identities()
-            .await
-            .map_err(|e| e.to_string())?
-            .into_iter()
-            .find(|i| i.id == iid),
-        None => None,
-    };
     let username = host
         .username
         .clone()
         .filter(|u| !u.is_empty())
-        .or_else(|| identity.as_ref().map(|i| i.username.clone()))
-        .filter(|u| !u.is_empty())
-        .ok_or("This host has no username; edit it or pick an identity")?;
+        .ok_or("This host has no username; edit it and set one")?;
     let mut params = ConnectParams::new(host.hostname.clone(), host.port, username);
     if let Some(secs) = host.keepalive_secs {
         params.keepalive = (secs > 0).then(|| std::time::Duration::from_secs(u64::from(secs)));
     }
-    if let Some(identity) = identity {
-        params.password = store
-            .get_identity_password(identity.id)
-            .await
-            .map_err(|e| e.to_string())?;
-        if let Some(kid) = identity.ssh_key_id
-            && let Some(pem) = store
+    match host.auth {
+        // Nothing stored: the session prompts when the server asks.
+        HostAuth::Ask => {}
+        HostAuth::Password => {
+            params.password = store
+                .get_host_password(host.id)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        HostAuth::Key(kid) => {
+            let pem = store
                 .get_key_private(kid)
                 .await
                 .map_err(|e| e.to_string())?
-        {
+                .ok_or("The key this host uses no longer exists; edit the host")?;
             let passphrase = store
                 .get_key_passphrase(kid)
                 .await

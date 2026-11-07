@@ -3,7 +3,7 @@
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
-use tern_core::{Group, Host, Identity, KnownHost, SshKeyMeta, Tunnel};
+use tern_core::{Group, Host, HostId, KnownHost, SshKeyMeta, Tunnel};
 use tern_vault::{KdfParams, derive_kek, generate_salt, open, seal};
 
 use crate::{Error, Result};
@@ -38,13 +38,11 @@ pub struct Bundle {
     pub payload: String,
 }
 
-/// An identity plus its optional saved password.
+/// A host's saved password (hosts themselves carry no secrets).
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct IdentityEntry {
-    #[serde(flatten)]
-    pub identity: Identity,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub password: Option<String>,
+pub struct HostPassword {
+    pub host_id: HostId,
+    pub password: String,
 }
 
 /// An SSH key's metadata plus its secrets.
@@ -58,11 +56,11 @@ pub struct KeyEntry {
     pub passphrase: Option<String>,
 }
 
-impl std::fmt::Debug for IdentityEntry {
+impl std::fmt::Debug for HostPassword {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("IdentityEntry")
-            .field("identity", &self.identity)
-            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+        f.debug_struct("HostPassword")
+            .field("host_id", &self.host_id)
+            .field("password", &"<redacted>")
             .finish()
     }
 }
@@ -84,7 +82,7 @@ pub struct Payload {
     #[serde(default)]
     pub hosts: Vec<Host>,
     #[serde(default)]
-    pub identities: Vec<IdentityEntry>,
+    pub host_passwords: Vec<HostPassword>,
     #[serde(default)]
     pub ssh_keys: Vec<KeyEntry>,
     #[serde(default)]
@@ -198,25 +196,71 @@ pub fn decrypt(bytes: &[u8], password: &SecretString) -> Result<Payload> {
         .map_err(|e| Error::Invalid(e.to_string()))?;
     let key = derive_kek(password, &salt, &params).map_err(|e| Error::Invalid(e.to_string()))?;
     let plain = open(&key, &sealed, AAD).map_err(|_| Error::WrongPasswordOrCorrupt)?;
-    serde_json::from_slice(plain.expose_secret())
-        .map_err(|e| Error::Invalid(format!("payload: {e}")))
+    let mut value: serde_json::Value = serde_json::from_slice(plain.expose_secret())
+        .map_err(|e| Error::Invalid(format!("payload: {e}")))?;
+    fold_legacy_identities(&mut value);
+    serde_json::from_value(value).map_err(|e| Error::Invalid(format!("payload: {e}")))
+}
+
+/// Bundles written before identities were removed carry `identities` and `hosts[].identity_id`.
+/// Fold each identity into the hosts that used it (username, key, password), then drop it.
+fn fold_legacy_identities(value: &mut serde_json::Value) {
+    use serde_json::{Value, json};
+    let Some(obj) = value.as_object_mut() else {
+        return;
+    };
+    let identities: Vec<Value> = match obj.remove("identities") {
+        Some(Value::Array(a)) => a,
+        _ => Vec::new(),
+    };
+    let mut passwords = Vec::new();
+    if let Some(Value::Array(hosts)) = obj.get_mut("hosts") {
+        for host in hosts.iter_mut().filter_map(Value::as_object_mut) {
+            let ident_id = host.remove("identity_id");
+            let ident = ident_id
+                .as_ref()
+                .and_then(Value::as_str)
+                .and_then(|id| identities.iter().find(|i| i["id"].as_str() == Some(id)));
+            let Some(ident) = ident else { continue };
+            let has_user = host
+                .get("username")
+                .and_then(Value::as_str)
+                .is_some_and(|u| !u.is_empty());
+            if !has_user && let Some(u) = ident.get("username") {
+                host.insert("username".into(), u.clone());
+            }
+            if let Some(k) = ident.get("ssh_key_id").filter(|k| k.is_string()) {
+                host.insert("auth".into(), json!({"kind": "key", "key_id": k}));
+            } else if ident.get("password").is_some_and(Value::is_string) {
+                host.insert("auth".into(), json!({"kind": "password"}));
+            }
+            if let (Some(pw), Some(id)) = (
+                ident.get("password").filter(|p| p.is_string()),
+                host.get("id"),
+            ) {
+                passwords.push(json!({"host_id": id, "password": pw}));
+            }
+        }
+    }
+    if !passwords.is_empty() {
+        let list = obj.entry("host_passwords").or_insert_with(|| json!([]));
+        if let Value::Array(a) = list {
+            a.extend(passwords);
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use tern_core::{Host, KeyId};
 
     #[test]
     fn secret_bearing_entries_never_debug_print_secrets() {
-        let id = IdentityEntry {
-            identity: tern_core::Identity {
-                id: tern_core::IdentityId::new(),
-                label: "l".into(),
-                username: "u".into(),
-                ssh_key_id: None,
-            },
-            password: Some("hunter2-secret".into()),
+        let id = HostPassword {
+            host_id: HostId::new(),
+            password: "hunter2-secret".into(),
         };
         let key = KeyEntry {
             meta: SshKeyMeta {
@@ -230,7 +274,7 @@ mod tests {
             passphrase: Some("pass-phrase-secret".into()),
         };
         let payload = Payload {
-            identities: vec![id.clone()],
+            host_passwords: vec![id.clone()],
             ssh_keys: vec![key.clone()],
             ..Payload::default()
         };
@@ -238,6 +282,40 @@ mod tests {
         for needle in ["hunter2", "PRIVATE-KEY-BODY", "pass-phrase-secret"] {
             assert!(!dbg.contains(needle), "{needle} leaked: {dbg}");
         }
+    }
+
+    #[test]
+    fn legacy_identities_fold_into_hosts() {
+        let (h1, h2, i1, i2, k) = (
+            HostId::new(),
+            HostId::new(),
+            "00000000-0000-4000-8000-0000000000a1",
+            "00000000-0000-4000-8000-0000000000a2",
+            KeyId::new(),
+        );
+        let mut v = json!({
+            "hosts": [
+                {"id": h1, "label": "a", "hostname": "a", "port": 22, "username": null,
+                 "identity_id": i1, "group_id": null, "jump_host_id": null, "tags": [],
+                 "notes": null, "keepalive_secs": null},
+                {"id": h2, "label": "b", "hostname": "b", "port": 22, "username": "me",
+                 "identity_id": i2, "group_id": null, "jump_host_id": null, "tags": [],
+                 "notes": null, "keepalive_secs": null}
+            ],
+            "identities": [
+                {"id": i1, "label": "x", "username": "alice", "ssh_key_id": null, "password": "pw1"},
+                {"id": i2, "label": "y", "username": "bob", "ssh_key_id": k}
+            ]
+        });
+        fold_legacy_identities(&mut v);
+        let p: Payload = serde_json::from_value(v).unwrap();
+        assert_eq!(p.hosts[0].username.as_deref(), Some("alice"));
+        assert_eq!(p.hosts[0].auth, tern_core::HostAuth::Password);
+        assert_eq!(p.hosts[1].username.as_deref(), Some("me"));
+        assert_eq!(p.hosts[1].auth, tern_core::HostAuth::Key(k));
+        assert_eq!(p.host_passwords.len(), 1);
+        assert_eq!(p.host_passwords[0].host_id, p.hosts[0].id);
+        assert_eq!(p.host_passwords[0].password, "pw1");
     }
 
     fn pw(s: &str) -> SecretString {

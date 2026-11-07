@@ -210,7 +210,7 @@ pub fn view(form: &IoForm) -> Element<'_, Message> {
                 )
                 .into(),
             ));
-            hint = "Referenced IdentityFiles are imported as keys + identities.";
+            hint = "Referenced IdentityFiles are imported as keys.";
         }
         (Some(Preview::Keys(keys)), _) => {
             for (i, k) in keys.iter().enumerate() {

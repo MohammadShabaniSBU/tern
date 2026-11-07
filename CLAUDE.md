@@ -7,6 +7,8 @@ Full plan lives in `docs/` — read `docs/README.md`, `docs/ARCHITECTURE.md`, `d
 
 ## Current status
 
+Identities were removed (after Sprint 9): a host carries `username` + `auth` (`HostAuth::{Ask, Password, Key(KeyId)}`). The password is encrypted in `hosts.password_enc` (AAD `hosts:password_enc:<host id>`; `Store::set_host_password/get_host_password`). Migration `002_host_auth.sql` folds old identities into hosts; the emptied `identities` table and `hosts.identity_id` stay unused (SQLite cannot drop an FK column without rebuilding `hosts`, which would cascade-delete tunnels), and a migrated password keeps its old AAD in `hosts.password_aad` until it is next saved. Sections are now Hosts/Keys/Tunnels (`1`..`3`); `Store::delete_key` refuses while hosts use the key. Old backups still import (`fold_legacy_identities` in `tern-io/bundle.rs`). Not hand-tested in the GUI.
+
 Sprint 0–8 are done (S0-T03 CI was skipped by the user; no macOS/Windows packaging by request). Sprint 8 was implemented without GUI hand-testing: the settings screen, auto-lock and rebind flows are covered by unit tests only. Do not write code for later work until the user asks (`docs/sprints/backlog.md`).
 
 Sprint 8: jump hosts (`ConnectParams.jump` chain, `connect_chain` in `tern-ssh/session.rs`, `resolve_host` in `sessions.rs` with cycle detection; live test `terminal_through_a_jump_host_verifies_every_hop` needs `TERN_SSH_JUMP_TARGET=host:port` as seen from the bastion, which needs `AllowTcpForwarding yes`), `autolock.rs` (settings `lock.idle_minutes|keep_sessions`; wall-clock gap between ticks = sleep detected), `settings.rs` + `app/settings_ops.rs` (settings overlay; keymap overrides in `State.keymap_overrides`; `Store::change_security` re-wraps the data key for password/KDF-cost changes), `crash.rs` (panic hook → `<data>/crash-*.log`), `docs/SECURITY.md`, `docs/PERFORMANCE.md`, `packaging/` (tarball verified; `.deb` metadata verified with cargo-deb; AppImage script untested). Binary is now named `tern` (package still `tern-app`). The optional `mlock` was skipped because `unsafe` is forbidden.
@@ -31,7 +33,7 @@ Sprint 2 app modules (`crates/tern-app/src`): `action.rs` (one-table action regi
 
 | Crate | Role |
 |---|---|
-| `tern-core` | Domain types (Host, Group, Identity, SshKeyMeta, Tunnel) + validation. No I/O. |
+| `tern-core` | Domain types (Host, HostAuth, Group, SshKeyMeta, Tunnel) + validation. No I/O. |
 | `tern-vault` | KDF (Argon2id), AEAD (XChaCha20-Poly1305), data-key wrapping, secret helpers |
 | `tern-store` | SQLite schema, migrations, repositories |
 | `tern-ssh` | russh client wrapper, auth, known-hosts, tunnels (session actors over mpsc) |

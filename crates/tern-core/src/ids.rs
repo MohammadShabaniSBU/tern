@@ -49,8 +49,6 @@ macro_rules! id_type {
 
 id_type!(/// Identifies a [`Host`](crate::Host).
     HostId);
-id_type!(/// Identifies an [`Identity`](crate::Identity).
-    IdentityId);
 id_type!(/// Identifies an [`SshKeyMeta`](crate::SshKeyMeta).
     KeyId);
 id_type!(/// Identifies a [`Tunnel`](crate::Tunnel).

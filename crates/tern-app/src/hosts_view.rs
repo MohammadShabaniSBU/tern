@@ -1,8 +1,8 @@
 //! Pure mapping from stored hosts/groups to list rows and the detail pane text (S3-T01).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use tern_core::{Group, GroupId, Host, HostId, Identity, IdentityId};
+use tern_core::{Group, GroupId, Host, HostAuth, HostId, SshKeyMeta};
 
 use crate::list::Item;
 use crate::palette::HostRef;
@@ -35,7 +35,10 @@ impl HostSort {
 pub struct HostsData {
     pub hosts: Vec<Host>,
     pub groups: Vec<Group>,
-    pub identities: Vec<Identity>,
+    /// Stored keys, for the auth picker and the detail pane.
+    pub keys: Vec<SshKeyMeta>,
+    /// Hosts that have a saved password.
+    pub with_password: HashSet<HostId>,
     /// RFC 3339 timestamps keyed by host.
     pub last_connected: HashMap<HostId, String>,
 }
@@ -52,8 +55,17 @@ impl HostsData {
             .map(|g| g.name.as_str())
     }
 
-    fn identity(&self, id: IdentityId) -> Option<&Identity> {
-        self.identities.iter().find(|i| i.id == id)
+    /// Human text for how a host authenticates; never includes a secret.
+    fn auth_text(&self, h: &Host) -> String {
+        match h.auth {
+            HostAuth::Ask => "Ask each time".to_owned(),
+            HostAuth::Password if self.with_password.contains(&h.id) => "Password".to_owned(),
+            HostAuth::Password => "Password (none saved)".to_owned(),
+            HostAuth::Key(k) => match self.keys.iter().find(|x| x.id == k) {
+                Some(key) => format!("Key: {}", key.label),
+                None => "Key (missing)".to_owned(),
+            },
+        }
     }
 
     /// Display-ordered rows: groups (nested) first, then ungrouped hosts.
@@ -123,16 +135,12 @@ impl HostsData {
             .with_search(search)
     }
 
-    /// `user@hostname:port`; the user is the host override, else the identity's, else omitted.
+    /// `user@hostname:port`; the user is omitted when the host has none.
     fn destination(&self, h: &Host) -> String {
         let user = h
             .username
             .as_deref()
-            .or_else(|| {
-                h.identity_id
-                    .and_then(|i| self.identity(i))
-                    .map(|i| i.username.as_str())
-            })
+            .filter(|u| !u.is_empty())
             .map(|u| format!("{u}@"))
             .unwrap_or_default();
         format!("{user}{}:{}", h.hostname, h.port)
@@ -172,15 +180,11 @@ impl HostsData {
     /// Detail pane for a host id; secrets are never included, only whether one is set.
     pub fn host_detail(&self, id: &str) -> Option<String> {
         let h = self.host(id)?;
-        let identity = h.identity_id.and_then(|i| self.identity(i));
         let mut lines = vec![
             h.label.clone(),
             String::new(),
             format!("Address     {}", self.destination(h)),
-            format!(
-                "Identity    {}",
-                identity.map_or("(none)", |i| i.label.as_str())
-            ),
+            format!("Auth        {}", self.auth_text(h)),
             format!(
                 "Group       {}",
                 h.group_id
@@ -201,11 +205,7 @@ impl HostsData {
                     .map_or("default".to_owned(), |s| format!("{s}s"))
             ),
             format!("Last used   {}", self.last_seen(h.id)),
-            "Password    ••••••••".to_owned(),
         ];
-        if identity.is_none() {
-            lines.pop();
-        }
         if let Some(n) = h.notes.as_deref().filter(|n| !n.is_empty()) {
             lines.push(String::new());
             lines.push(n.to_owned());
@@ -267,7 +267,8 @@ mod tests {
         HostsData {
             hosts: vec![a, b, c],
             groups: vec![work],
-            identities: vec![],
+            keys: vec![],
+            with_password: HashSet::new(),
             last_connected: last,
         }
     }

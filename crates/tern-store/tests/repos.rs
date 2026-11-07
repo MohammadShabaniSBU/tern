@@ -41,15 +41,6 @@ fn key_meta(label: &str) -> SshKeyMeta {
     }
 }
 
-fn identity(label: &str, key: Option<KeyId>) -> Identity {
-    Identity {
-        id: IdentityId::new(),
-        label: label.into(),
-        username: "root".into(),
-        ssh_key_id: key,
-    }
-}
-
 fn tunnel(host: HostId) -> Tunnel {
     Tunnel {
         id: TunnelId::new(),
@@ -148,22 +139,6 @@ fn deleting_group_moves_hosts_and_subgroups_to_top_level() {
 }
 
 #[test]
-fn deleting_identity_unsets_host_identity() {
-    let conn = db();
-    let vault = vault();
-    let ids = IdentityRepo::new(&conn);
-    let hosts = HostRepo::new(&conn);
-    let ident = identity("me", None);
-    ids.insert(&ident, None, &vault).unwrap();
-    let mut host = Host::new("h", "h");
-    host.identity_id = Some(ident.id);
-    hosts.insert(&host).unwrap();
-
-    ids.delete(ident.id).unwrap();
-    assert_eq!(hosts.get(host.id).unwrap().unwrap().identity_id, None);
-}
-
-#[test]
 fn deleting_jump_host_unsets_reference_but_keeps_host() {
     let conn = db();
     let hosts = HostRepo::new(&conn);
@@ -203,67 +178,70 @@ fn group_crud() {
     assert!(matches!(repo.update(&g), Err(Error::NotFound { .. })));
 }
 
-// ---------- identities ----------
+// ---------- host auth & passwords ----------
+
+fn host_with_password(hosts: &HostRepo<'_>, vault: &Vault, label: &str, pw: &str) -> Host {
+    let mut host = Host::new(label, "h.example");
+    host.username = Some("root".into());
+    host.auth = HostAuth::Password;
+    hosts.insert(&host).unwrap();
+    hosts
+        .set_password(host.id, Some(&secret(pw)), vault)
+        .unwrap();
+    host
+}
 
 #[test]
-fn identity_crud_and_password_round_trip() {
+fn host_auth_round_trips() {
     let conn = db();
     let vault = vault();
-    let repo = IdentityRepo::new(&conn);
-    let mut ident = identity("Admin", None);
+    let keys = KeyRepo::new(&conn);
+    let hosts = HostRepo::new(&conn);
+    let meta = key_meta("k");
+    keys.insert(&meta, &secret("PEM"), None, &vault).unwrap();
+    for auth in [HostAuth::Ask, HostAuth::Password, HostAuth::Key(meta.id)] {
+        let mut host = Host::new("h", "h");
+        host.auth = auth;
+        hosts.insert(&host).unwrap();
+        assert_eq!(hosts.get(host.id).unwrap().unwrap(), host);
+        host.auth = HostAuth::Ask;
+        hosts.update(&host).unwrap();
+        assert_eq!(hosts.get(host.id).unwrap().unwrap().auth, HostAuth::Ask);
+    }
+}
 
-    repo.insert(&ident, Some(&secret("hunter2")), &vault)
-        .unwrap();
-    assert_eq!(repo.get(ident.id).unwrap().unwrap(), ident);
-    assert!(repo.has_password(ident.id).unwrap());
-    assert_eq!(
-        repo.get_password(ident.id, &vault)
-            .unwrap()
-            .unwrap()
-            .expose_secret(),
-        "hunter2"
-    );
+#[test]
+fn host_password_round_trip() {
+    let conn = db();
+    let vault = vault();
+    let hosts = HostRepo::new(&conn);
+    let host = host_with_password(&hosts, &vault, "a", "hunter2");
+    assert!(hosts.has_password(host.id).unwrap());
+    let got = hosts.get_password(host.id, &vault).unwrap().unwrap();
+    assert_eq!(got.expose_secret(), "hunter2");
 
     // Updating non-secret fields leaves the password alone.
-    ident.username = "admin".into();
-    repo.update(&ident).unwrap();
-    assert_eq!(
-        repo.get_password(ident.id, &vault)
-            .unwrap()
-            .unwrap()
-            .expose_secret(),
-        "hunter2"
-    );
+    let mut edited = host.clone();
+    edited.username = Some("admin".into());
+    hosts.update(&edited).unwrap();
+    let got = hosts.get_password(host.id, &vault).unwrap().unwrap();
+    assert_eq!(got.expose_secret(), "hunter2");
 
-    repo.set_password(ident.id, Some(&secret("new")), &vault)
-        .unwrap();
-    assert_eq!(
-        repo.get_password(ident.id, &vault)
-            .unwrap()
-            .unwrap()
-            .expose_secret(),
-        "new"
-    );
-    repo.set_password(ident.id, None, &vault).unwrap();
-    assert!(!repo.has_password(ident.id).unwrap());
-    assert!(repo.get_password(ident.id, &vault).unwrap().is_none());
-
-    assert!(repo.delete(ident.id).unwrap());
-    assert!(repo.list().unwrap().is_empty());
+    hosts.set_password(host.id, None, &vault).unwrap();
+    assert!(!hosts.has_password(host.id).unwrap());
+    assert!(hosts.get_password(host.id, &vault).unwrap().is_none());
 }
 
 #[test]
 fn password_is_not_stored_in_plaintext() {
     let conn = db();
     let vault = vault();
-    let ident = identity("Admin", None);
     let password = "correct-horse-battery-staple";
-    IdentityRepo::new(&conn)
-        .insert(&ident, Some(&secret(password)), &vault)
-        .unwrap();
+    let hosts = HostRepo::new(&conn);
+    host_with_password(&hosts, &vault, "a", password);
 
     let blob: Vec<u8> = conn
-        .query_row("SELECT password_enc FROM identities", [], |r| r.get(0))
+        .query_row("SELECT password_enc FROM hosts", [], |r| r.get(0))
         .unwrap();
     assert!(!blob.is_empty());
     assert!(
@@ -272,55 +250,48 @@ fn password_is_not_stored_in_plaintext() {
             .any(|w| w == password.as_bytes()),
         "plaintext found in password_enc"
     );
-    // And nowhere else in the row either.
-    let other: (String, String) = conn
-        .query_row("SELECT label, username FROM identities", [], |r| {
-            Ok((r.get(0)?, r.get(1)?))
-        })
-        .unwrap();
-    assert!(!other.0.contains(password) && !other.1.contains(password));
 }
 
 #[test]
 fn ciphertext_cannot_be_swapped_between_rows() {
     let conn = db();
     let vault = vault();
-    let repo = IdentityRepo::new(&conn);
-    let (a, b) = (identity("a", None), identity("b", None));
-    repo.insert(&a, Some(&secret("pw-a")), &vault).unwrap();
-    repo.insert(&b, Some(&secret("pw-b")), &vault).unwrap();
-
+    let hosts = HostRepo::new(&conn);
+    let a = host_with_password(&hosts, &vault, "a", "pw-a");
+    let b = host_with_password(&hosts, &vault, "b", "pw-b");
     conn.execute(
-        "UPDATE identities SET password_enc = (SELECT password_enc FROM identities WHERE id = ?1) \
+        "UPDATE hosts SET password_enc = (SELECT password_enc FROM hosts WHERE id = ?1) \
          WHERE id = ?2",
         [a.id.to_string(), b.id.to_string()],
     )
     .unwrap();
-    assert!(repo.get_password(b.id, &vault).is_err());
+    assert!(hosts.get_password(b.id, &vault).is_err());
 }
 
 #[test]
 fn password_needs_the_right_vault() {
     let conn = db();
-    let ident = identity("a", None);
-    let repo = IdentityRepo::new(&conn);
-    repo.insert(&ident, Some(&secret("pw")), &vault()).unwrap();
-    assert!(repo.get_password(ident.id, &vault()).is_err());
+    let hosts = HostRepo::new(&conn);
+    let host = host_with_password(&hosts, &vault(), "a", "pw");
+    assert!(hosts.get_password(host.id, &vault()).is_err());
 }
 
 #[test]
-fn deleting_key_unsets_identity_key() {
+fn deleting_key_unsets_host_key() {
     let conn = db();
     let vault = vault();
     let keys = KeyRepo::new(&conn);
-    let ids = IdentityRepo::new(&conn);
+    let hosts = HostRepo::new(&conn);
     let meta = key_meta("k");
     keys.insert(&meta, &secret("PEM"), None, &vault).unwrap();
-    let ident = identity("i", Some(meta.id));
-    ids.insert(&ident, None, &vault).unwrap();
+    let mut host = Host::new("h", "h");
+    host.auth = HostAuth::Key(meta.id);
+    hosts.insert(&host).unwrap();
+    assert_eq!(hosts.count_using_key(meta.id).unwrap(), 1);
 
     keys.delete(meta.id).unwrap();
-    assert_eq!(ids.get(ident.id).unwrap().unwrap().ssh_key_id, None);
+    // The repo only unsets the reference; `Store::delete_key` refuses earlier.
+    assert_eq!(hosts.get(host.id).unwrap().unwrap().auth, HostAuth::Ask);
 }
 
 // ---------- keys ----------
@@ -551,11 +522,9 @@ fn listing_never_touches_secrets() {
     // Listing works even with a corrupt secret column, proving it does not decrypt.
     let conn = db();
     let vault = vault();
-    let ident = identity("a", None);
-    IdentityRepo::new(&conn)
-        .insert(&ident, Some(&secret("pw")), &vault)
+    let hosts = HostRepo::new(&conn);
+    let host = host_with_password(&hosts, &vault, "a", "pw");
+    conn.execute("UPDATE hosts SET password_enc = x'00'", [])
         .unwrap();
-    conn.execute("UPDATE identities SET password_enc = x'00'", [])
-        .unwrap();
-    assert_eq!(IdentityRepo::new(&conn).list().unwrap(), vec![ident]);
+    assert_eq!(hosts.list().unwrap(), vec![host]);
 }

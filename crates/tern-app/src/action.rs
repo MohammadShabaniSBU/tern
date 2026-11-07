@@ -64,29 +64,22 @@ impl Category {
     }
 }
 
-/// Top-level sections shown in the sidebar (`1`..`4`).
+/// Top-level sections shown in the sidebar (`1`..`3`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Section {
     #[default]
     Hosts,
     Keys,
-    Identities,
     Tunnels,
 }
 
 impl Section {
-    pub const ALL: [Section; 4] = [
-        Section::Hosts,
-        Section::Keys,
-        Section::Identities,
-        Section::Tunnels,
-    ];
+    pub const ALL: [Section; 3] = [Section::Hosts, Section::Keys, Section::Tunnels];
 
     pub fn label(self) -> &'static str {
         match self {
             Section::Hosts => "Hosts",
             Section::Keys => "Keys",
-            Section::Identities => "Identities",
             Section::Tunnels => "Tunnels",
         }
     }
@@ -141,8 +134,7 @@ actions! {
     // Navigation
     GoHosts      => "nav.hosts",      "Go to Hosts",           Navigation, ["1"], N;
     GoKeys       => "nav.keys",       "Go to Keys",            Navigation, ["2"], N;
-    GoIdentities => "nav.identities", "Go to Identities",      Navigation, ["3"], N;
-    GoTunnels    => "nav.tunnels",    "Go to Tunnels",         Navigation, ["4"], N;
+    GoTunnels    => "nav.tunnels",    "Go to Tunnels",         Navigation, ["3"], N;
     // Lists
     MoveDown     => "list.down",      "Move selection down",   List, ["j", "down"], N;
     MoveUp       => "list.up",        "Move selection up",     List, ["k", "up"], N;
@@ -173,7 +165,7 @@ actions! {
     CopyPublicKey => "key.copy_public", "Copy public key",     List, ["shift+y"], N;
     ToggleMark   => "list.mark",      "Mark/unmark for bulk actions", List, ["space"], N;
     BulkTag      => "host.tag",       "Add tags to marked hosts", List, ["shift+t"], N;
-    RevealStored => "identity.reveal", "Reveal stored password (asks master password)", List, ["shift+r"], N;
+    RevealStored => "host.reveal_password", "Reveal host password (asks master password)", List, ["shift+r"], N;
     ExportKey    => "key.export",     "Export private key to file (asks master password)", List, ["shift+e"], N;
     Duplicate    => "item.duplicate", "Duplicate selected",    List, ["y"], N;
     ToggleTunnels => "item.tunnels",  "Start/stop host tunnels", List, ["t"], N;
@@ -237,7 +229,6 @@ impl Action {
         match self {
             Action::GoHosts => Some(Section::Hosts),
             Action::GoKeys => Some(Section::Keys),
-            Action::GoIdentities => Some(Section::Identities),
             Action::GoTunnels => Some(Section::Tunnels),
             _ => None,
         }

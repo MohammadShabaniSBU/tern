@@ -4,11 +4,11 @@
 use std::collections::HashMap;
 
 use secrecy::{ExposeSecret, SecretString};
-use tern_core::{GroupId, HostId, IdentityId, KeyId, TunnelId};
+use tern_core::{GroupId, HostAuth, HostId, KeyId, TunnelId};
 use tern_store::Db;
 
 use crate::Result;
-use crate::bundle::{IdentityEntry, KeyEntry, Payload};
+use crate::bundle::{HostPassword, KeyEntry, Payload};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Strategy {
@@ -46,7 +46,6 @@ pub fn snapshot(db: &Db, scope: &Scope) -> Result<Payload> {
         hosts: db.hosts().list()?,
         ..Payload::default()
     };
-    let identities = db.identities().list()?;
     let keys = db.keys().list()?;
     p.tunnels = db.tunnels().list()?;
     p.known_hosts = db.known_hosts().list()?;
@@ -111,20 +110,22 @@ pub fn snapshot(db: &Db, scope: &Scope) -> Result<Payload> {
         p.tunnels.retain(|t| host_ids.contains(&t.host_id));
         p.known_hosts.clear();
         p.settings.clear();
-        let used_ident: Vec<IdentityId> = p.hosts.iter().filter_map(|h| h.identity_id).collect();
-        let identities: Vec<_> = identities
-            .into_iter()
-            .filter(|i| used_ident.contains(&i.id))
+        let used_keys: Vec<KeyId> = p
+            .hosts
+            .iter()
+            .filter_map(|h| match h.auth {
+                HostAuth::Key(k) => Some(k),
+                _ => None,
+            })
             .collect();
-        let used_keys: Vec<KeyId> = identities.iter().filter_map(|i| i.ssh_key_id).collect();
         let keys: Vec<_> = keys
             .into_iter()
             .filter(|k| used_keys.contains(&k.id))
             .collect();
-        fill_secrets(db, vault, &mut p, identities, keys)?;
+        fill_secrets(db, vault, &mut p, keys)?;
         return Ok(p);
     }
-    fill_secrets(db, vault, &mut p, identities, keys)?;
+    fill_secrets(db, vault, &mut p, keys)?;
     Ok(p)
 }
 
@@ -132,15 +133,15 @@ fn fill_secrets(
     db: &Db,
     vault: &tern_vault::Vault,
     p: &mut Payload,
-    identities: Vec<tern_core::Identity>,
     keys: Vec<tern_core::SshKeyMeta>,
 ) -> Result<()> {
-    for identity in identities {
-        let password = db
-            .identities()
-            .get_password(identity.id, vault)?
-            .map(|s| s.expose_secret().to_string());
-        p.identities.push(IdentityEntry { identity, password });
+    for host in &p.hosts {
+        if let Some(password) = db.hosts().get_password(host.id, vault)? {
+            p.host_passwords.push(HostPassword {
+                host_id: host.id,
+                password: password.expose_secret().to_string(),
+            });
+        }
     }
     for meta in keys {
         let private_key = db
@@ -162,9 +163,7 @@ fn fill_secrets(
 
 /// Remove all secrets (for the plaintext export without secrets).
 pub fn strip_secrets(p: &mut Payload) {
-    for i in &mut p.identities {
-        i.password = None;
-    }
+    p.host_passwords.clear();
     for k in &mut p.ssh_keys {
         k.private_key = None;
         k.passphrase = None;
@@ -204,11 +203,6 @@ pub fn plan(incoming: &Payload, local: &Payload) -> Counts {
         .hosts
         .iter()
         .for_each(|x| c.add(classify(x, h.get(&x.id).copied())));
-    let i = by(&local.identities, |x| x.identity.id);
-    incoming
-        .identities
-        .iter()
-        .for_each(|x| c.add(classify(x, i.get(&x.identity.id).copied())));
     let k = by(&local.ssh_keys, |x| x.meta.id);
     incoming
         .ssh_keys
@@ -300,7 +294,6 @@ fn apply_inner(db: &Db, mut inc: Payload, strategy: Strategy) -> Result<Applied>
     // --- id remapping for KeepBoth ---
     let mut gmap: HashMap<GroupId, GroupId> = HashMap::new();
     let mut kmap: HashMap<KeyId, KeyId> = HashMap::new();
-    let mut imap: HashMap<IdentityId, IdentityId> = HashMap::new();
     let mut hmap: HashMap<HostId, HostId> = HashMap::new();
 
     // Groups, parent-first.
@@ -387,38 +380,7 @@ fn apply_inner(db: &Db, mut inc: Payload, strategy: Strategy) -> Result<Applied>
             .insert(&k.meta, &private, secret(&k.passphrase).as_ref(), vault)?;
     }
 
-    // Identities.
-    for mut i in inc.identities {
-        let orig = i.identity.id;
-        if let Some(k) = i.identity.ssh_key_id {
-            i.identity.ssh_key_id = Some(*kmap.get(&k).unwrap_or(&k));
-        }
-        match local.identities.iter().find(|x| x.identity.id == orig) {
-            Some(l) if *l == i => out.skipped += 1,
-            Some(_) if strategy == Strategy::Skip => out.skipped += 1,
-            Some(_) if strategy == Strategy::Overwrite => {
-                db.identities().update(&i.identity)?;
-                if let Some(pw) = secret(&i.password) {
-                    db.identities().set_password(orig, Some(&pw), vault)?;
-                }
-                out.overwritten += 1;
-            }
-            Some(_) => {
-                i.identity.id = IdentityId::new();
-                i.identity.label = suffix(&i.identity.label);
-                imap.insert(orig, i.identity.id);
-                db.identities()
-                    .insert(&i.identity, secret(&i.password).as_ref(), vault)?;
-                out.added += 1;
-            }
-            None => {
-                db.identities()
-                    .insert(&i.identity, secret(&i.password).as_ref(), vault)?;
-                out.added += 1;
-            }
-        }
-    }
-
+    let inc_passwords = std::mem::take(&mut inc.host_passwords);
     // Hosts: first without jump host, then link.
     let mut jumps: Vec<(HostId, HostId)> = Vec::new();
     for mut h in inc.hosts {
@@ -426,9 +388,13 @@ fn apply_inner(db: &Db, mut inc: Payload, strategy: Strategy) -> Result<Applied>
         if let Some(g) = h.group_id {
             h.group_id = Some(*gmap.get(&g).unwrap_or(&g));
         }
-        if let Some(i) = h.identity_id {
-            h.identity_id = Some(*imap.get(&i).unwrap_or(&i));
+        if let HostAuth::Key(k) = h.auth {
+            h.auth = HostAuth::Key(*kmap.get(&k).unwrap_or(&k));
         }
+        let password = inc_passwords
+            .iter()
+            .find(|p| p.host_id == orig)
+            .and_then(|p| secret(&Some(p.password.clone())));
         let jump = h.jump_host_id.take();
         let existing = local.hosts.iter().find(|x| x.id == orig);
         let mut link = true;
@@ -440,6 +406,8 @@ fn apply_inner(db: &Db, mut inc: Payload, strategy: Strategy) -> Result<Applied>
                     a == h
                 } && l.jump_host_id == jump =>
             {
+                // Re-assert the stored row: overwriting a key may have unset its key reference.
+                db.hosts().update(l)?;
                 out.skipped += 1;
                 link = false;
             }
@@ -449,6 +417,9 @@ fn apply_inner(db: &Db, mut inc: Payload, strategy: Strategy) -> Result<Applied>
             }
             Some(_) if strategy == Strategy::Overwrite => {
                 db.hosts().update(&h)?;
+                if let Some(pw) = &password {
+                    db.hosts().set_password(h.id, Some(pw), vault)?;
+                }
                 out.overwritten += 1;
             }
             Some(_) => {
@@ -456,10 +427,16 @@ fn apply_inner(db: &Db, mut inc: Payload, strategy: Strategy) -> Result<Applied>
                 h.label = suffix(&h.label);
                 hmap.insert(orig, h.id);
                 db.hosts().insert(&h)?;
+                if let Some(pw) = &password {
+                    db.hosts().set_password(h.id, Some(pw), vault)?;
+                }
                 out.added += 1;
             }
             None => {
                 db.hosts().insert(&h)?;
+                if let Some(pw) = &password {
+                    db.hosts().set_password(h.id, Some(pw), vault)?;
+                }
                 out.added += 1;
             }
         }
@@ -539,7 +516,7 @@ fn apply_inner(db: &Db, mut inc: Payload, strategy: Strategy) -> Result<Applied>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tern_core::{Group, Host, Identity, SshKeyMeta, Tunnel, TunnelKind};
+    use tern_core::{Group, Host, HostAuth, SshKeyMeta, Tunnel, TunnelKind};
     use tern_store::Store;
     use tern_vault::KdfParams;
 
@@ -572,19 +549,11 @@ mod tests {
         s.insert_key(key.clone(), SecretString::from("PRIV".to_string()), None)
             .await
             .unwrap();
-        let ident = Identity {
-            id: IdentityId::new(),
-            label: "me".into(),
-            username: "root".into(),
-            ssh_key_id: Some(key.id),
-        };
-        s.insert_identity(ident.clone(), Some(SecretString::from("pw".to_string())))
-            .await
-            .unwrap();
         let mut jump = Host::new("jump", "j.example.com");
         jump.group_id = Some(g.id);
         let mut web = Host::new("web", "w.example.com");
-        web.identity_id = Some(ident.id);
+        web.username = Some("root".into());
+        web.auth = HostAuth::Key(key.id);
         web.jump_host_id = Some(jump.id);
         s.insert_host(jump.clone()).await.unwrap();
         s.insert_host(web.clone()).await.unwrap();
@@ -600,6 +569,13 @@ mod tests {
             auto_start: false,
         };
         s.insert_tunnel(t).await.unwrap();
+        // The jump host authenticates with a password.
+        let mut jump2 = jump.clone();
+        jump2.auth = HostAuth::Password;
+        s.update_host(jump2).await.unwrap();
+        s.set_host_password(jump.id, Some(SecretString::from("pw".to_string())))
+            .await
+            .unwrap();
         (jump.id, web.id)
     }
 
@@ -625,6 +601,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(again, payload);
+        assert_eq!(payload.host_passwords.len(), 1);
         assert!(
             again
                 .hosts

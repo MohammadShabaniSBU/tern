@@ -481,10 +481,6 @@ pub fn dummy_items(section: crate::action::Section) -> Vec<Item> {
         Section::Keys => (1..=1000)
             .map(|n| Item::leaf(format!("key-{n:04}"), 0))
             .collect(),
-        Section::Identities => ["deploy", "admin", "backup"]
-            .iter()
-            .map(|n| Item::leaf(*n, 0))
-            .collect(),
         Section::Tunnels => ["db-forward", "socks-proxy"]
             .iter()
             .map(|n| Item::leaf(*n, 0))

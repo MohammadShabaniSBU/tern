@@ -19,7 +19,7 @@ A backup is a UTF-8 JSON file (conventionally `*.tern`) with an unencrypted enve
 - A wrong password and a tampered file both fail authentication and are reported as "wrong password, or the backup is corrupted".
 
 ## Decrypted payload (JSON)
-`groups`, `hosts`, `identities` (flattened Identity + optional `password`), `ssh_keys` (flattened key metadata + `private_key`, optional `passphrase`), `tunnels`, `known_hosts`, `settings` (array of `[key, json-text]`). Entity ids are UUIDs and are preserved, so backups can be merged across machines. Secrets are re-encrypted with the importing vault's data key; ciphertext is never copied between vaults.
+`groups`, `hosts` (each with `username` and `auth`: `{"kind":"ask"|"password"}` or `{"kind":"key","key_id":…}`), `host_passwords` (`{host_id, password}`), `ssh_keys` (flattened key metadata + `private_key`, optional `passphrase`), `tunnels`, `known_hosts`, `settings` (array of `[key, json-text]`). Entity ids are UUIDs and are preserved, so backups can be merged across machines. Secrets are re-encrypted with the importing vault's data key; ciphertext is never copied between vaults.
 
 ## Versioning
 Additive changes keep `version: 1` (unknown payload fields are ignored; missing arrays default to empty). Breaking changes bump `version`.

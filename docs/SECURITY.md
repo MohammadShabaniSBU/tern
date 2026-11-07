@@ -5,7 +5,7 @@ does not.
 
 ## Protects against
 
-- **A stolen disk, laptop or copied `tern.db`.** Secrets (identity passwords, private keys,
+- **A stolen disk, laptop or copied `tern.db`.** Secrets (host passwords, private keys,
   key passphrases) are stored only as XChaCha20-Poly1305 ciphertext. The data key is wrapped by a
   key derived from the master password with Argon2id (default 128 MiB / 8 passes; adjustable in
   Settings → Security). Without the master password (or the recovery key) the file reveals only

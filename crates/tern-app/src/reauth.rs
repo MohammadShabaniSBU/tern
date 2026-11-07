@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use iced::Element;
 use iced::widget::{column, text, text_input};
-use tern_core::{IdentityId, KeyId};
+use tern_core::{HostId, KeyId};
 
 use crate::app::Message;
 use crate::auth::Sensitive;
@@ -57,7 +57,7 @@ impl Gate {
 /// The sensitive operation waiting for the password.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SensitiveOp {
-    RevealPassword(IdentityId),
+    RevealPassword(HostId),
     ExportKey(KeyId),
     OpenIo(crate::io_form::IoKind),
 }

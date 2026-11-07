@@ -21,6 +21,9 @@ pub enum Error {
     /// The store worker thread is gone (it panicked or the store was shut down).
     #[error("store worker has stopped")]
     Closed,
+    /// A key cannot be deleted while hosts still authenticate with it.
+    #[error("this key is used by {0} host(s); change their authentication first")]
+    KeyInUse(usize),
     #[error("{entity} not found")]
     NotFound { entity: &'static str },
     /// A stored value could not be interpreted (never includes the value itself).

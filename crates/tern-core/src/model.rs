@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::validate::{validate_hostname, validate_label, validate_port, validate_username};
-use crate::{GroupId, HostId, IdentityId, KeyId, KnownHostId, TunnelId, ValidationError};
+use crate::{GroupId, HostId, KeyId, KnownHostId, TunnelId, ValidationError};
 
 /// A folder for organising hosts. Groups may nest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -18,6 +18,19 @@ impl Group {
     }
 }
 
+/// How a host authenticates.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "key_id", rename_all = "snake_case")]
+pub enum HostAuth {
+    /// Nothing stored; the user is prompted when the server asks.
+    #[default]
+    Ask,
+    /// A password stored encrypted with the host.
+    Password,
+    /// A stored SSH key.
+    Key(KeyId),
+}
+
 /// A saved SSH destination.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Host {
@@ -25,9 +38,11 @@ pub struct Host {
     pub label: String,
     pub hostname: String,
     pub port: u16,
-    /// Overrides the identity's username when set.
+    /// Login name. Required to connect; the UI insists on it.
     pub username: Option<String>,
-    pub identity_id: Option<IdentityId>,
+    /// How to authenticate. Secret material (the password) is kept encrypted by the store.
+    #[serde(default)]
+    pub auth: HostAuth,
     pub group_id: Option<GroupId>,
     pub jump_host_id: Option<HostId>,
     pub tags: Vec<String>,
@@ -44,7 +59,7 @@ impl Host {
             hostname: hostname.into(),
             port: 22,
             username: None,
-            identity_id: None,
+            auth: HostAuth::Ask,
             group_id: None,
             jump_host_id: None,
             tags: Vec::new(),
@@ -61,23 +76,6 @@ impl Host {
             validate_username(username)?;
         }
         Ok(())
-    }
-}
-
-/// Login details. Secret material (password, key contents) is deliberately **not** part of this
-/// type; the storage layer keeps it encrypted separately.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Identity {
-    pub id: IdentityId,
-    pub label: String,
-    pub username: String,
-    pub ssh_key_id: Option<KeyId>,
-}
-
-impl Identity {
-    pub fn validate(&self) -> Result<(), ValidationError> {
-        validate_label(&self.label)?;
-        validate_username(&self.username)
     }
 }
 

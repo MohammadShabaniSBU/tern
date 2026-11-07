@@ -9,7 +9,10 @@ use crate::Result;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn migrations() -> Migrations<'static> {
-    Migrations::new(vec![M::up(include_str!("../migrations/001_init.sql"))])
+    Migrations::new(vec![
+        M::up(include_str!("../migrations/001_init.sql")),
+        M::up(include_str!("../migrations/002_host_auth.sql")),
+    ])
 }
 
 /// Open (creating if needed) the database at `path`, apply pragmas and migrate to the latest
@@ -161,10 +164,89 @@ mod tests {
                 .unwrap()
         };
         let before = version(&conn);
-        assert_eq!(before, 1);
+        assert_eq!(before, 2);
         migrations().to_latest(&mut conn).unwrap();
         assert_eq!(version(&conn), before);
         assert_eq!(migrations().pending_migrations(&conn).unwrap(), 0);
+    }
+
+    #[test]
+    fn migration_002_folds_identities_into_hosts() {
+        use secrecy::{ExposeSecret, SecretString};
+        use tern_vault::{KdfParams, Vault};
+
+        const H1: &str = "00000000-0000-4000-8000-000000000001";
+        let (vault, _) =
+            Vault::create_with_params(&SecretString::from("m"), KdfParams::new(8, 1, 1).unwrap())
+                .unwrap();
+        let mut conn = Connection::open_in_memory().unwrap();
+        configure(&conn, false).unwrap();
+        migrations().to_version(&mut conn, 1).unwrap();
+        let blob = vault
+            .seal(b"legacy-pw", b"identities:password_enc:i1")
+            .unwrap();
+        conn.execute(
+            "INSERT INTO ssh_keys (id, label, key_type, public_key, fingerprint, private_key_enc, \
+             created_at, updated_at) VALUES ('k1','k','t','p','f',x'00','x','x')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO identities (id, label, username, password_enc, ssh_key_id, created_at, \
+             updated_at) VALUES ('i1','me','alice',?1,NULL,'x','x'), \
+             ('i2','keyed','bob',NULL,'k1','x','x')",
+            [blob],
+        )
+        .unwrap();
+        for (id, ident, user) in [
+            (H1, Some("i1"), None),
+            ("h2", Some("i2"), Some("override")),
+            ("h3", None, None),
+        ] {
+            conn.execute(
+                "INSERT INTO hosts (id, label, hostname, username, identity_id, created_at, \
+                 updated_at) VALUES (?1, ?1, 'h', ?2, ?3, 'x', 'x')",
+                rusqlite::params![id, user, ident],
+            )
+            .unwrap();
+        }
+        migrations().to_latest(&mut conn).unwrap();
+
+        let row = |id: &str| -> (String, Option<String>, Option<String>) {
+            conn.query_row(
+                "SELECT auth_kind, username, ssh_key_id FROM hosts WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap()
+        };
+        assert_eq!(row(H1), ("password".into(), Some("alice".into()), None));
+        assert_eq!(
+            row("h2"),
+            ("key".into(), Some("override".into()), Some("k1".into()))
+        );
+        assert_eq!(row("h3"), ("ask".into(), None, None));
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM identities", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0);
+
+        // Through the repo, using the vault: the legacy AAD is honoured.
+        let hosts = crate::repo::HostRepo::new(&conn);
+        let got = hosts
+            .get_password(H1.parse().unwrap(), &vault)
+            .unwrap()
+            .unwrap();
+        assert_eq!(got.expose_secret(), "legacy-pw");
+        // Re-saving seals it for the host and drops the legacy AAD.
+        hosts
+            .set_password(H1.parse().unwrap(), Some(&got), &vault)
+            .unwrap();
+        let got = hosts
+            .get_password(H1.parse().unwrap(), &vault)
+            .unwrap()
+            .unwrap();
+        assert_eq!(got.expose_secret(), "legacy-pw");
     }
 
     #[test]

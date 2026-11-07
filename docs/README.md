@@ -4,7 +4,7 @@
 
 ## Goals
 
-- Store **hosts**, **SSH keys**, **passwords/identities** and **tunnels** locally.
+- Store **hosts**, **SSH keys**, **passwords** and **tunnels** locally.
 - **No server, no account, no sync service.** All data lives in one SQLite file on disk.
 - Secrets are **encrypted at rest** behind a master password.
 - Full **import / export** (encrypted backup bundle + import from `~/.ssh/config` and key files).
@@ -27,7 +27,7 @@
 | `sprints/sprint-00-foundation.md` | Workspace, tooling, iced skeleton |
 | `sprints/sprint-01-storage-and-vault.md` | SQLite schema, migrations, encryption, master password |
 | `sprints/sprint-02-keyboard-ui-shell.md` | App shell, focus model, command palette, keymap engine |
-| `sprints/sprint-03-hosts-and-credentials.md` | Host / group / identity / key management UI |
+| `sprints/sprint-03-hosts-and-credentials.md` | Host / group / key management UI |
 | `sprints/sprint-04-ssh-engine.md` | `russh` client, auth, known-hosts, async bridge to iced |
 | `sprints/sprint-05-terminal.md` | Terminal emulation + rendering widget, tabs |
 | `sprints/sprint-06-tunnels.md` | Local / remote / dynamic port forwarding |

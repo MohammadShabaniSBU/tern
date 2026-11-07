@@ -13,15 +13,12 @@ use std::sync::mpsc;
 
 use rusqlite::Connection;
 use secrecy::SecretString;
-use tern_core::{
-    Group, GroupId, Host, HostId, Identity, IdentityId, KeyId, SshKeyMeta, Tunnel, TunnelId,
-};
+use tern_core::{Group, GroupId, Host, HostId, KeyId, SshKeyMeta, Tunnel, TunnelId};
 use tern_vault::{KdfParams, Vault};
 use tokio::sync::oneshot;
 
 use crate::repo::{
-    GroupRepo, HostRepo, IdentityRepo, KeyRepo, KnownHostRepo, SettingsRepo, TunnelRepo,
-    VaultMetaRepo,
+    GroupRepo, HostRepo, KeyRepo, KnownHostRepo, SettingsRepo, TunnelRepo, VaultMetaRepo,
 };
 use crate::{Error, Result};
 
@@ -46,9 +43,6 @@ impl Db {
     }
     pub fn groups(&self) -> GroupRepo<'_> {
         GroupRepo::new(&self.conn)
-    }
-    pub fn identities(&self) -> IdentityRepo<'_> {
-        IdentityRepo::new(&self.conn)
     }
     pub fn keys(&self) -> KeyRepo<'_> {
         KeyRepo::new(&self.conn)
@@ -270,55 +264,25 @@ impl Store {
         self.query(move |db| db.tunnels().delete(id)).await
     }
 
-    // ---------- identities ----------
+    // ---------- host passwords ----------
 
-    pub async fn list_identities(&self) -> Result<Vec<Identity>> {
-        self.query(|db| db.identities().list()).await
-    }
-
-    /// Insert an identity, optionally with a password. Requires an unlocked vault (the UI only
-    /// edits identities while unlocked), even when no password is given.
-    pub async fn insert_identity(
+    /// Set (`Some`) or clear (`None`) the host's stored password. Needs an unlocked vault.
+    pub async fn set_host_password(
         &self,
-        identity: Identity,
+        id: HostId,
         password: Option<SecretString>,
     ) -> Result<()> {
-        self.query(move |db| {
-            db.identities()
-                .insert(&identity, password.as_ref(), db.vault()?)
-        })
-        .await
-    }
-
-    pub async fn get_identity_password(&self, id: IdentityId) -> Result<Option<SecretString>> {
-        self.query(move |db| db.identities().get_password(id, db.vault()?))
+        self.query(move |db| db.hosts().set_password(id, password.as_ref(), db.vault()?))
             .await
     }
 
-    pub async fn delete_identity(&self, id: IdentityId) -> Result<bool> {
-        self.query(move |db| db.identities().delete(id)).await
+    pub async fn get_host_password(&self, id: HostId) -> Result<Option<SecretString>> {
+        self.query(move |db| db.hosts().get_password(id, db.vault()?))
+            .await
     }
 
-    /// Update non-secret fields; `password` is `Some(change)` to set (`Some(Some)`) or clear
-    /// (`Some(None)`) the stored password, `None` to leave it as is.
-    pub async fn update_identity(
-        &self,
-        identity: Identity,
-        password: Option<Option<SecretString>>,
-    ) -> Result<()> {
-        self.query(move |db| {
-            db.identities().update(&identity)?;
-            if let Some(pw) = password {
-                db.identities()
-                    .set_password(identity.id, pw.as_ref(), db.vault()?)?;
-            }
-            Ok(())
-        })
-        .await
-    }
-
-    pub async fn identity_has_password(&self, id: IdentityId) -> Result<bool> {
-        self.query(move |db| db.identities().has_password(id)).await
+    pub async fn host_has_password(&self, id: HostId) -> Result<bool> {
+        self.query(move |db| db.hosts().has_password(id)).await
     }
 
     // ---------- host extras ----------
@@ -382,7 +346,14 @@ impl Store {
     }
 
     pub async fn delete_key(&self, id: KeyId) -> Result<bool> {
-        self.query(move |db| db.keys().delete(id)).await
+        self.query(move |db| {
+            let n = db.hosts().count_using_key(id)?;
+            if n > 0 {
+                return Err(Error::KeyInUse(n));
+            }
+            db.keys().delete(id)
+        })
+        .await
     }
 
     pub async fn get_key_private(&self, id: KeyId) -> Result<Option<SecretString>> {
@@ -399,6 +370,7 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use secrecy::ExposeSecret;
+    use tern_core::HostAuth;
 
     use super::*;
 
@@ -455,7 +427,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn keys_and_identity_updates_round_trip() {
+    async fn keys_and_host_auth_round_trip() {
         let store = Store::open_in_memory().unwrap();
         store
             .create_vault_with_params(pw("master"), fast())
@@ -479,28 +451,27 @@ mod tests {
         let phrase = store.get_key_passphrase(meta.id).await.unwrap().unwrap();
         assert_eq!(phrase.expose_secret(), "pass");
 
-        let mut identity = Identity {
-            id: IdentityId::new(),
-            label: "me".into(),
-            username: "root".into(),
-            ssh_key_id: None,
-        };
+        let mut host = Host::new("h", "h");
+        host.auth = HostAuth::Password;
+        store.insert_host(host.clone()).await.unwrap();
         store
-            .insert_identity(identity.clone(), Some(pw("one")))
+            .set_host_password(host.id, Some(pw("one")))
             .await
             .unwrap();
-        identity.ssh_key_id = Some(meta.id);
-        // `None` leaves the password alone.
-        store.update_identity(identity.clone(), None).await.unwrap();
-        let got = store.get_identity_password(identity.id).await.unwrap();
+        let got = store.get_host_password(host.id).await.unwrap();
         assert_eq!(got.unwrap().expose_secret(), "one");
-        // `Some(None)` clears it.
-        store
-            .update_identity(identity.clone(), Some(None))
-            .await
-            .unwrap();
-        assert!(!store.identity_has_password(identity.id).await.unwrap());
-        assert_eq!(store.list_identities().await.unwrap(), vec![identity]);
+        store.set_host_password(host.id, None).await.unwrap();
+        assert!(!store.host_has_password(host.id).await.unwrap());
+
+        // A key in use cannot be deleted.
+        host.auth = HostAuth::Key(meta.id);
+        store.update_host(host.clone()).await.unwrap();
+        assert!(matches!(
+            store.delete_key(meta.id).await,
+            Err(Error::KeyInUse(1))
+        ));
+        host.auth = HostAuth::Ask;
+        store.update_host(host).await.unwrap();
         assert!(store.delete_key(meta.id).await.unwrap());
     }
 
@@ -572,31 +543,26 @@ mod tests {
             .create_vault_with_params(pw("master"), fast())
             .await
             .unwrap();
-        let ident = Identity {
-            id: IdentityId::new(),
-            label: "me".into(),
-            username: "root".into(),
-            ssh_key_id: None,
-        };
+        let ident = Host::new("me", "h");
+        store.insert_host(ident.clone()).await.unwrap();
         store
-            .insert_identity(ident.clone(), Some(pw("hunter2")))
+            .set_host_password(ident.id, Some(pw("hunter2")))
             .await
             .unwrap();
 
         // Listing works while locked and never decrypts.
         store.lock().await.unwrap();
-        assert_eq!(store.list_identities().await.unwrap(), vec![ident.clone()]);
+        assert_eq!(
+            store.get_host(ident.id).await.unwrap().unwrap(),
+            ident.clone()
+        );
         assert!(matches!(
-            store.get_identity_password(ident.id).await,
+            store.get_host_password(ident.id).await,
             Err(Error::Locked)
         ));
 
         store.unlock(pw("master")).await.unwrap();
-        let got = store
-            .get_identity_password(ident.id)
-            .await
-            .unwrap()
-            .unwrap();
+        let got = store.get_host_password(ident.id).await.unwrap().unwrap();
         assert_eq!(got.expose_secret(), "hunter2");
     }
 
@@ -607,14 +573,10 @@ mod tests {
             .create_vault_with_params(pw("old"), fast())
             .await
             .unwrap();
-        let ident = Identity {
-            id: IdentityId::new(),
-            label: "me".into(),
-            username: "root".into(),
-            ssh_key_id: None,
-        };
+        let ident = Host::new("me", "h");
+        store.insert_host(ident.clone()).await.unwrap();
         store
-            .insert_identity(ident.clone(), Some(pw("secret")))
+            .set_host_password(ident.id, Some(pw("secret")))
             .await
             .unwrap();
 
@@ -631,7 +593,7 @@ mod tests {
         store.unlock(pw("new")).await.unwrap();
         assert_eq!(
             store
-                .get_identity_password(ident.id)
+                .get_host_password(ident.id)
                 .await
                 .unwrap()
                 .unwrap()
