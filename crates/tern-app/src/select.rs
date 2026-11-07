@@ -78,6 +78,10 @@ struct State {
     focused: bool,
     open: bool,
     highlight: usize,
+    /// Pixel offset of the option list inside the menu.
+    scroll: f32,
+    /// Scroll the highlighted row into view on the next layout.
+    reveal: bool,
 }
 
 impl Focusable for State {
@@ -161,6 +165,8 @@ impl<'a> Widget<Message, Theme, Renderer> for Select<'a> {
                 if s.focused {
                     s.open = true;
                     s.highlight = self.current;
+                    s.scroll = 0.0;
+                    s.reveal = true;
                     shell.capture_event();
                     return;
                 }
@@ -173,6 +179,8 @@ impl<'a> Widget<Message, Theme, Renderer> for Select<'a> {
                         let s = tree.state.downcast_mut::<State>();
                         s.open = true;
                         s.highlight = self.current;
+                        s.scroll = 0.0;
+                        s.reveal = true;
                         shell.capture_event();
                         return;
                     }
@@ -285,6 +293,38 @@ impl<'a> Widget<Message, Theme, Renderer> for Select<'a> {
 
 const ROW_H: f32 = 28.0;
 const MENU_PAD: f32 = 4.0;
+/// The menu never grows past this many rows; longer lists scroll.
+const MAX_VISIBLE_ROWS: f32 = 8.0;
+const BAR_W: f32 = 4.0;
+
+/// Scroll offset that brings `row` fully into a viewport of height `viewport_h`.
+fn reveal(scroll: f32, row: usize, viewport_h: f32) -> f32 {
+    let top = row as f32 * ROW_H;
+    let bottom = top + ROW_H;
+    if top < scroll {
+        top
+    } else if bottom > scroll + viewport_h {
+        bottom - viewport_h
+    } else {
+        scroll
+    }
+}
+
+fn clamp_scroll(scroll: f32, content: f32, viewport_h: f32) -> f32 {
+    scroll.clamp(0.0, (content - viewport_h).max(0.0))
+}
+
+/// Scrollbar thumb as `(offset from track top, height)`; `None` when everything fits.
+fn thumb(scroll: f32, content: f32, viewport_h: f32) -> Option<(f32, f32)> {
+    if content <= viewport_h {
+        return None;
+    }
+    let h = (viewport_h * viewport_h / content)
+        .max(16.0)
+        .min(viewport_h);
+    let max_scroll = content - viewport_h;
+    Some(((viewport_h - h) * (scroll / max_scroll), h))
+}
 
 /// The open option list.
 struct Menu<'b> {
@@ -297,7 +337,7 @@ struct Menu<'b> {
 
 impl Menu<'_> {
     fn row_at(&self, bounds: Rectangle, p: Point) -> Option<usize> {
-        let y = p.y - bounds.y - MENU_PAD;
+        let y = p.y - bounds.y - MENU_PAD + self.state.scroll;
         (bounds.contains(p) && y >= 0.0)
             .then(|| (y / ROW_H) as usize)
             .filter(|i| *i < self.labels.len())
@@ -307,6 +347,7 @@ impl Menu<'_> {
         let len = self.labels.len() as i32;
         if len > 0 {
             self.state.highlight = (self.state.highlight as i32 + delta).rem_euclid(len) as usize;
+            self.state.reveal = true;
         }
     }
 
@@ -320,14 +361,28 @@ impl Menu<'_> {
 
 impl overlay::Overlay<Message, Theme, Renderer> for Menu<'_> {
     fn layout(&mut self, _renderer: &Renderer, bounds: Size) -> layout::Node {
-        let height = self.labels.len() as f32 * ROW_H + 2.0 * MENU_PAD;
+        let content = self.labels.len() as f32 * ROW_H;
+        let want = content.min(MAX_VISIBLE_ROWS * ROW_H) + 2.0 * MENU_PAD;
         let below = self.field.y + self.field.height + 2.0;
-        // Flip above the field when there is no room underneath.
-        let y = if below + height > bounds.height && self.field.y - 2.0 - height >= 0.0 {
-            self.field.y - 2.0 - height
+        let room_below = bounds.height - below;
+        let room_above = self.field.y - 2.0;
+        // Prefer below; flip above when it does not fit there; otherwise shrink to the roomier side.
+        let (height, y) = if want <= room_below {
+            (want, below)
+        } else if want <= room_above {
+            (want, self.field.y - 2.0 - want)
+        } else if room_below >= room_above {
+            (room_below.max(ROW_H + 2.0 * MENU_PAD), below)
         } else {
-            below
+            let h = room_above.max(ROW_H + 2.0 * MENU_PAD);
+            (h, self.field.y - 2.0 - h)
         };
+        let viewport_h = height - 2.0 * MENU_PAD;
+        if self.state.reveal {
+            self.state.reveal = false;
+            self.state.scroll = reveal(self.state.scroll, self.state.highlight, viewport_h);
+        }
+        self.state.scroll = clamp_scroll(self.state.scroll, content, viewport_h);
         layout::Node::new(Size::new(self.field.width, height)).move_to(Point::new(self.field.x, y))
     }
 
@@ -354,39 +409,69 @@ impl overlay::Overlay<Message, Theme, Renderer> for Menu<'_> {
             Background::Color(p.bg_overlay),
         );
         let hovered = cursor.position().and_then(|c| self.row_at(bounds, c));
-        for (i, label) in self.labels.iter().enumerate() {
-            let row = Rectangle {
-                x: bounds.x + MENU_PAD,
-                y: bounds.y + MENU_PAD + i as f32 * ROW_H,
-                width: bounds.width - 2.0 * MENU_PAD,
-                height: ROW_H,
-            };
-            let lit = i == self.state.highlight || hovered == Some(i);
-            if lit {
-                renderer.fill_quad(
-                    renderer::Quad {
-                        bounds: row,
-                        border: Border::default().rounded(RADIUS_MD),
-                        ..renderer::Quad::default()
+        let inner = Rectangle {
+            x: bounds.x,
+            y: bounds.y + MENU_PAD,
+            width: bounds.width,
+            height: bounds.height - 2.0 * MENU_PAD,
+        };
+        let content = self.labels.len() as f32 * ROW_H;
+        let bar = thumb(self.state.scroll, content, inner.height);
+        let text_w =
+            bounds.width - 2.0 * MENU_PAD - 12.0 - if bar.is_some() { BAR_W + 4.0 } else { 0.0 };
+        renderer.with_layer(inner, |renderer| {
+            for (i, label) in self.labels.iter().enumerate() {
+                let row = Rectangle {
+                    x: bounds.x + MENU_PAD,
+                    y: inner.y + i as f32 * ROW_H - self.state.scroll,
+                    width: bounds.width - 2.0 * MENU_PAD,
+                    height: ROW_H,
+                };
+                if row.y + row.height < inner.y || row.y > inner.y + inner.height {
+                    continue;
+                }
+                let lit = i == self.state.highlight || hovered == Some(i);
+                if lit {
+                    renderer.fill_quad(
+                        renderer::Quad {
+                            bounds: row,
+                            border: Border::default().rounded(RADIUS_MD),
+                            ..renderer::Quad::default()
+                        },
+                        Background::Color(p.selection_palette),
+                    );
+                }
+                renderer.fill_text(
+                    text::Text {
+                        content: label.clone(),
+                        bounds: Size::new(text_w, row.height),
+                        size: TEXT_LABEL.into(),
+                        line_height: text::LineHeight::default(),
+                        font: renderer.default_font(),
+                        align_x: text::Alignment::Default,
+                        align_y: alignment::Vertical::Center,
+                        shaping: text::Shaping::Basic,
+                        wrapping: text::Wrapping::None,
                     },
-                    Background::Color(p.selection_palette),
+                    Point::new(row.x + 6.0, row.center_y()),
+                    p.text_primary,
+                    row.intersection(&inner).unwrap_or(row),
                 );
             }
-            renderer.fill_text(
-                text::Text {
-                    content: label.clone(),
-                    bounds: Size::new(row.width - 12.0, row.height),
-                    size: TEXT_LABEL.into(),
-                    line_height: text::LineHeight::default(),
-                    font: renderer.default_font(),
-                    align_x: text::Alignment::Default,
-                    align_y: alignment::Vertical::Center,
-                    shaping: text::Shaping::Basic,
-                    wrapping: text::Wrapping::None,
+        });
+        if let Some((off, h)) = bar {
+            renderer.fill_quad(
+                renderer::Quad {
+                    bounds: Rectangle {
+                        x: bounds.x + bounds.width - BAR_W - 3.0,
+                        y: inner.y + off,
+                        width: BAR_W,
+                        height: h,
+                    },
+                    border: Border::default().rounded(BAR_W / 2.0),
+                    ..renderer::Quad::default()
                 },
-                Point::new(row.x + 6.0, row.center_y()),
-                p.text_primary,
-                row,
+                Background::Color(p.border_strong),
             );
         }
     }
@@ -422,6 +507,19 @@ impl overlay::Overlay<Message, Theme, Renderer> for Menu<'_> {
                 }
                 shell.capture_event();
             }
+            Event::Mouse(mouse::Event::WheelScrolled { delta }) if cursor.is_over(bounds) => {
+                let dy = match delta {
+                    mouse::ScrollDelta::Lines { y, .. } => -y * ROW_H,
+                    mouse::ScrollDelta::Pixels { y, .. } => -y,
+                };
+                let content = self.labels.len() as f32 * ROW_H;
+                self.state.scroll = clamp_scroll(
+                    self.state.scroll + dy,
+                    content,
+                    bounds.height - 2.0 * MENU_PAD,
+                );
+                shell.capture_event();
+            }
             Event::Mouse(mouse::Event::CursorMoved { position }) => {
                 if let Some(i) = self.row_at(bounds, *position) {
                     self.state.highlight = i;
@@ -451,5 +549,28 @@ impl overlay::Overlay<Message, Theme, Renderer> for Menu<'_> {
         } else {
             mouse::Interaction::None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reveal_scrolls_down_and_up() {
+        let vp = 8.0 * ROW_H;
+        assert_eq!(reveal(0.0, 3, vp), 0.0);
+        assert_eq!(reveal(0.0, 10, vp), 11.0 * ROW_H - vp);
+        assert_eq!(reveal(5.0 * ROW_H, 2, vp), 2.0 * ROW_H);
+    }
+
+    #[test]
+    fn clamp_and_thumb() {
+        let vp = 8.0 * ROW_H;
+        assert_eq!(clamp_scroll(999.0, 32.0 * ROW_H, vp), 24.0 * ROW_H);
+        assert_eq!(clamp_scroll(-5.0, 32.0 * ROW_H, vp), 0.0);
+        assert_eq!(thumb(0.0, 5.0 * ROW_H, vp), None);
+        let (off, h) = thumb(24.0 * ROW_H, 32.0 * ROW_H, vp).unwrap();
+        assert!((off + h - vp).abs() < 0.001);
     }
 }

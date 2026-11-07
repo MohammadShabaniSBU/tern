@@ -126,8 +126,11 @@ pub fn import(
     comment: &str,
     passphrase: Option<&SecretString>,
 ) -> Result<KeyMaterial, KeyError> {
-    let parsed =
-        PrivateKey::from_openssh(text.trim()).map_err(|e| KeyError::Invalid(e.to_string()))?;
+    let text = text.trim();
+    if !text.contains("OPENSSH PRIVATE KEY") {
+        return import_legacy(text, public, comment, passphrase);
+    }
+    let parsed = PrivateKey::from_openssh(text).map_err(|e| KeyError::Invalid(e.to_string()))?;
     let given = match public.map(str::trim).filter(|p| !p.is_empty()) {
         Some(p) => {
             let key = russh::keys::PublicKey::from_openssh(p)
@@ -162,6 +165,37 @@ pub fn import(
     Ok(m)
 }
 
+/// Legacy PEM (`BEGIN RSA/EC PRIVATE KEY`, PKCS#8) and PuTTY keys: decoded once, then stored
+/// re-encoded as OpenSSH (encrypted with the passphrase if one was given).
+fn import_legacy(
+    text: &str,
+    public: Option<&str>,
+    comment: &str,
+    passphrase: Option<&SecretString>,
+) -> Result<KeyMaterial, KeyError> {
+    let key = russh::keys::decode_secret_key(text, passphrase.map(|p| p.expose_secret())).map_err(
+        |e| match e {
+            russh::keys::Error::KeyIsEncrypted => KeyError::PassphraseRequired,
+            e if passphrase.is_some() && e.to_string().to_lowercase().contains("crypt") => {
+                KeyError::WrongPassphrase
+            }
+            e => KeyError::Invalid(e.to_string()),
+        },
+    )?;
+    let mut m = describe(&key, passphrase, comment)?;
+    if let Some(p) = public.map(str::trim).filter(|p| !p.is_empty()) {
+        let given = russh::keys::PublicKey::from_openssh(p)
+            .map_err(|e| KeyError::InvalidPublic(e.to_string()))?;
+        if given.key_data() != key.public_key().key_data() {
+            return Err(KeyError::PublicMismatch);
+        }
+        m.public_key = given
+            .to_openssh()
+            .map_err(|e| KeyError::InvalidPublic(e.to_string()))?;
+    }
+    Ok(m)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,6 +213,31 @@ mod tests {
         assert!(m.public_key.ends_with(" me@tern"));
         let again = import(m.private_pem.expose_secret(), None, "", None).unwrap();
         assert_eq!(again.fingerprint, m.fingerprint);
+    }
+
+    #[test]
+    fn legacy_rsa_pkcs1_pem_is_converted() {
+        let pem = include_str!("../tests/fixtures/rsa_pkcs1.pem");
+        assert!(pem.contains("BEGIN RSA PRIVATE KEY"));
+        let m = import(pem, None, "me", None).unwrap();
+        assert_eq!(m.key_type, "ssh-rsa");
+        assert!(
+            m.private_pem
+                .expose_secret()
+                .contains("OPENSSH PRIVATE KEY")
+        );
+        // The stored form re-imports to the same key.
+        let again = import(m.private_pem.expose_secret(), None, "", None).unwrap();
+        assert_eq!(again.fingerprint, m.fingerprint);
+    }
+
+    #[test]
+    fn legacy_pkcs8_pem_is_converted() {
+        let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
+        let mut pem = Vec::new();
+        russh::keys::encode_pkcs8_pem(&key, &mut pem).unwrap();
+        let m = import(std::str::from_utf8(&pem).unwrap(), None, "", None).unwrap();
+        assert_eq!(m.fingerprint, key.fingerprint(HashAlg::Sha256).to_string());
     }
 
     #[test]

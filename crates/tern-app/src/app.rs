@@ -277,6 +277,7 @@ pub enum Message {
     ReauthSubmit,
     ReauthDone(Result<(), AuthFailure>),
     PasswordRevealed(Result<Option<Sensitive>, String>),
+    PrivateKeyFetched(Result<Sensitive, String>),
     PromptChanged(String),
     PromptSubmit,
     /// A group/move operation finished; the string is a toast message.
@@ -648,6 +649,14 @@ impl State {
             Message::PasswordRevealed(Ok(None)) => {
                 self.revealed = None;
                 self.toast(ToastKind::Info, "This host has no stored password");
+                Task::none()
+            }
+            Message::PrivateKeyFetched(Ok(pem)) => {
+                self.copy_secret(pem.as_str().to_owned(), "Copied private key")
+            }
+            Message::PrivateKeyFetched(Err(e)) => {
+                tracing::error!(error = %e, "could not read the private key");
+                self.toast(ToastKind::Error, "Could not read the private key");
                 Task::none()
             }
             Message::PasswordRevealed(Err(e)) => {
@@ -1064,7 +1073,18 @@ impl State {
                     None => Task::none(),
                 }
             }
-            Action::RevealStored | Action::ExportKey => Task::none(),
+            Action::CopyPrivateKey if self.section == Section::Keys => {
+                let id = self
+                    .list()
+                    .selected_item()
+                    .and_then(|i| i.id.as_deref())
+                    .and_then(|id| id.parse().ok());
+                match id {
+                    Some(id) => self.request_sensitive(SensitiveOp::CopyPrivateKey(id)),
+                    None => Task::none(),
+                }
+            }
+            Action::RevealStored | Action::ExportKey | Action::CopyPrivateKey => Task::none(),
             Action::ToggleMark | Action::BulkTag | Action::Duplicate => Task::none(),
             Action::Add if self.section == Section::Keys => {
                 self.open_key_form(KeyForm::new(KeyMode::Add))
@@ -2414,6 +2434,22 @@ impl State {
                     Message::PasswordRevealed,
                 )
             }
+            SensitiveOp::CopyPrivateKey(id) => {
+                let store = self.store.clone();
+                Task::perform(
+                    async move {
+                        store
+                            .get_key_private(id)
+                            .await
+                            .map_err(|e| e.to_string())?
+                            .map(|p| {
+                                Sensitive::new(secrecy::ExposeSecret::expose_secret(&p).to_owned())
+                            })
+                            .ok_or_else(|| "key has no private part".to_owned())
+                    },
+                    Message::PrivateKeyFetched,
+                )
+            }
             SensitiveOp::OpenIo(kind) => self.open_io(kind),
             SensitiveOp::ExportKey(id) => {
                 let label = self
@@ -2447,23 +2483,28 @@ impl State {
                     return Task::none();
                 }
                 let pw = form.password.as_str().to_owned();
-                self.clip_token += 1;
-                self.secret_on_clipboard = true;
-                let token = self.clip_token;
-                self.toast(
-                    ToastKind::Success,
-                    "Copied password; clipboard clears in 30 s",
-                );
-                return Task::batch([
-                    iced::clipboard::write(pw),
-                    Task::perform(
-                        tokio::time::sleep(std::time::Duration::from_secs(30)),
-                        move |()| Message::ClipboardClear(token),
-                    ),
-                ]);
+                return self.copy_secret(pw, "Copied password");
             }
         }
         Task::none()
+    }
+
+    /// Put a secret on the clipboard and clear it after 30 s (or on lock).
+    fn copy_secret(&mut self, secret: String, what: &str) -> Task<Message> {
+        self.clip_token += 1;
+        self.secret_on_clipboard = true;
+        let token = self.clip_token;
+        self.toast(
+            ToastKind::Success,
+            format!("{what}; clipboard clears in 30 s"),
+        );
+        Task::batch([
+            iced::clipboard::write(secret),
+            Task::perform(
+                tokio::time::sleep(std::time::Duration::from_secs(30)),
+                move |()| Message::ClipboardClear(token),
+            ),
+        ])
     }
 
     fn open_key_form(&mut self, form: KeyForm) -> Task<Message> {

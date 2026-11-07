@@ -168,6 +168,7 @@ actions! {
     BulkTag      => "host.tag",       "Add tags to marked hosts", List, ["shift+t"], N;
     RevealStored => "host.reveal_password", "Reveal host password (asks master password)", List, ["shift+r"], N;
     ExportKey    => "key.export",     "Export private key to file (asks master password)", List, ["shift+e"], N;
+    CopyPrivateKey => "key.copy_private", "Copy private key (asks master password; clipboard clears)", List, ["shift+c"], N;
     Duplicate    => "item.duplicate", "Duplicate selected",    List, ["y"], N;
     ToggleTunnels => "item.tunnels",  "Start/stop host tunnels", List, ["t"], N;
     // Forms
