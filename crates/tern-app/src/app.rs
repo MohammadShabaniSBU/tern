@@ -2,8 +2,8 @@
 
 use std::time::Instant;
 
-use iced::widget::{column, container, mouse_area, row, space, text, text_input};
-use iced::{Border, Element, Fill, Font, Subscription, Task, Theme};
+use iced::widget::{column, container, text};
+use iced::{Element, Fill, Font, Subscription, Task, Theme};
 use tern_store::Store;
 
 use crate::action::ModeMask;
@@ -34,6 +34,7 @@ use tern_term::{Motion, SelectKind};
 
 mod io_ops;
 mod settings_ops;
+mod shell;
 
 /// Which part of the app owns the keyboard. See `docs/KEYBINDINGS.md`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -3187,121 +3188,7 @@ impl State {
     }
 
     fn main_view(&self) -> Element<'_, Message> {
-        let mut nav = column![text("tern").size(20), space().height(12)].spacing(4);
-        for (n, section) in Section::ALL.into_iter().enumerate() {
-            let active = section == self.section;
-            let label = format!(
-                "{} {}  {}",
-                if active { ">" } else { " " },
-                n + 1,
-                section.label()
-            );
-            let goto = match section {
-                Section::Hosts => Action::GoHosts,
-                Section::Keys => Action::GoKeys,
-                Section::Identities => Action::GoIdentities,
-                Section::Tunnels => Action::GoTunnels,
-            };
-            nav = nav.push(
-                mouse_area(
-                    container(text(label).size(14))
-                        .width(Fill)
-                        .padding([2, 6])
-                        .style(move |theme: &Theme| selected_row_style(theme, active)),
-                )
-                .on_press(Message::Dispatch(goto)),
-            );
-        }
-        let sidebar = container(nav)
-            .padding(12)
-            .width(200)
-            .height(Fill)
-            .style(pane_frame(self.pane == Pane::Sidebar));
-
-        let filter = text_input("Filter (/)", &self.list().filter)
-            .id(FILTER_ID)
-            .on_input(Message::FilterChanged)
-            .on_submit(Message::FilterSubmitted);
-        let list = list::view(self.list(), self.pane == Pane::List);
-        let list_pane =
-            container(column![text(self.section.label()).size(16), filter, list,].spacing(10))
-                .padding(12)
-                .width(Fill)
-                .height(Fill)
-                .style(pane_frame(self.pane == Pane::List));
-
-        let detail_text = match self.list().selected_item() {
-            Some(item) if self.section == Section::Hosts && item.id.is_some() => item
-                .id
-                .as_deref()
-                .and_then(|id| self.host_data.host_detail(id))
-                .unwrap_or_else(|| item.label.clone()),
-            Some(item) if self.section == Section::Keys && item.id.is_some() => item
-                .id
-                .as_deref()
-                .and_then(|id| self.keys_data.detail(id))
-                .unwrap_or_else(|| item.label.clone()),
-            Some(item) if self.section == Section::Identities && item.id.is_some() => item
-                .id
-                .as_deref()
-                .and_then(|id| {
-                    let mut t = self.ids_data.detail(id, &self.keys_data.keys)?;
-                    if let Some((rid, pw)) = &self.revealed
-                        && rid == id
-                    {
-                        t.push_str(&format!(
-                            "\n\nRevealed password (Esc hides):\n{}",
-                            pw.as_str()
-                        ));
-                    }
-                    Some(t)
-                })
-                .unwrap_or_else(|| item.label.clone()),
-            Some(item) if self.section == Section::Tunnels && item.id.is_some() => item
-                .id
-                .as_deref()
-                .and_then(|id| self.tunnels_data.detail(id))
-                .unwrap_or_else(|| item.label.clone()),
-            Some(item) => format!(
-                "{}\n\n(details arrive with the {} screen, Sprint 3)",
-                item.label,
-                self.section.label().to_lowercase()
-            ),
-            None => "Nothing selected".to_owned(),
-        };
-        let detail = container(text(detail_text).size(14))
-            .padding(12)
-            .width(320)
-            .height(Fill)
-            .style(pane_frame(self.pane == Pane::Detail));
-
-        let mut status = row![
-            text(format!(
-                "-- {} --   {}",
-                self.mode.label(),
-                self.pane.label()
-            ))
-            .size(14),
-            space().width(Fill),
-        ];
-        let active = self.active_tunnel_count();
-        if active > 0 {
-            status = status.push(text(format!("⇄ {active} tunnel(s)   ")).size(14));
-        }
-        if let Some(toast) = self.toasts.current() {
-            let style: fn(&Theme) -> text::Style = match toast.kind {
-                ToastKind::Info => text::base,
-                ToastKind::Success => text::success,
-                ToastKind::Error => text::danger,
-            };
-            status = status.push(text(toast.text.as_str()).size(14).style(style));
-        }
-        let status_bar = container(status)
-            .padding([4, 12])
-            .width(Fill)
-            .style(container::bordered_box);
-
-        let home = column![row![sidebar, list_pane, detail].height(Fill), status_bar];
+        let home = self.shell_view();
         let content: Element<'_, Message> = match self.tab() {
             Some(s) => sessions::view(
                 s,
@@ -3312,13 +3199,22 @@ impl State {
                     focused: self.mode == Mode::Insert && self.modals.is_empty(),
                 },
             ),
-            None => home.into(),
+            None => home,
         };
         let base: Element<'_, Message> = if self.tabs.is_empty() {
             content
         } else {
             column![sessions::tab_bar(&self.tabs, self.active), content].into()
         };
+        let mut layers: Vec<Element<'_, Message>> = vec![self.with_overlays(base)];
+        if let Some(toasts) = self.toast_layer() {
+            layers.push(toasts);
+        }
+        column![iced::widget::stack(layers).height(Fill), self.status_bar()].into()
+    }
+
+    /// The form / modal / palette that sits above the base view, if any.
+    fn with_overlays<'a>(&'a self, base: Element<'a, Message>) -> Element<'a, Message> {
         if let Some(form) = &self.host_form {
             return iced::widget::stack![base, host_form::view(form)].into();
         }
@@ -3406,38 +3302,6 @@ impl State {
 
     pub fn theme(&self) -> Theme {
         crate::theme::theme(self.dark)
-    }
-}
-
-/// Container style for a pane: a visible focus ring while it has keyboard focus.
-fn pane_frame(focused: bool) -> impl Fn(&Theme) -> container::Style {
-    move |theme: &Theme| {
-        let palette = theme.extended_palette();
-        container::Style {
-            border: Border {
-                color: if focused {
-                    palette.primary.strong.color
-                } else {
-                    palette.background.strong.color
-                },
-                width: if focused { 2.0 } else { 1.0 },
-                radius: 4.0.into(),
-            },
-            ..container::Style::default()
-        }
-    }
-}
-
-fn selected_row_style(theme: &Theme, selected: bool) -> container::Style {
-    if !selected {
-        return container::Style::default();
-    }
-    let palette = theme.extended_palette();
-    container::Style {
-        background: Some(palette.primary.weak.color.into()),
-        text_color: Some(palette.primary.weak.text),
-        border: Border::default().rounded(4),
-        ..container::Style::default()
     }
 }
 

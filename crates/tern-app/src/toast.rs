@@ -49,8 +49,14 @@ impl Toasts {
         self.0.retain(|t| t.expires > now);
     }
 
+    #[cfg(test)]
     pub fn current(&self) -> Option<&Toast> {
         self.0.back()
+    }
+
+    /// Oldest first.
+    pub fn iter(&self) -> impl Iterator<Item = &Toast> {
+        self.0.iter()
     }
 
     pub fn is_empty(&self) -> bool {

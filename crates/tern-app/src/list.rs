@@ -5,12 +5,15 @@
 //! its children, which have a greater `depth`.
 
 use iced::widget::{column, container, row, scrollable, space, text};
-use iced::{Border, Center, Color, Element, Fill, Theme};
+use iced::{Center, Element, Fill, Theme};
 
 use crate::app::Message;
+use crate::theme;
+use crate::theme::style::{self, Dot, RowState};
+use crate::theme::tokens::{self, *};
 
 /// Fixed row height in logical pixels; makes scroll-into-view and windowing arithmetic exact.
-pub const ROW_H: f32 = 26.0;
+pub const ROW_H: f32 = tokens::ROW_H;
 /// Rows rendered beyond the visible window on each side.
 const OVERSCAN: usize = 8;
 /// Viewport height assumed until the scrollable reports its real size.
@@ -96,6 +99,11 @@ impl ListState {
         };
         s.refresh();
         s
+    }
+
+    /// Number of leaf (non-group) items, ignoring the filter.
+    pub fn len_leaves(&self) -> usize {
+        self.items.iter().filter(|i| i.group.is_none()).count()
     }
 
     pub fn len_visible(&self) -> usize {
@@ -373,7 +381,7 @@ impl ListState {
 /// Widget id of the list's scrollable.
 pub const LIST_ID: &str = "main-list";
 
-/// Render the list. `focused` draws the focus ring on the selected row.
+/// Render the list. `focused` shows the keyboard cursor as fill + accent border.
 pub fn view(list: &ListState, focused: bool) -> Element<'_, Message> {
     let window = list.window();
     let rows_above = window.start as f32 * ROW_H;
@@ -382,35 +390,66 @@ pub fn view(list: &ListState, focused: bool) -> Element<'_, Message> {
 
     let mut col = column![space().height(rows_above)];
     for (row, item) in list.visible_items(window) {
-        let marker = match item.group {
-            Some(true) => "▾ ",
-            Some(false) => "▸ ",
-            None => "  ",
-        };
-        let mark = if list.marked.contains(item.id.as_deref().unwrap_or("")) {
-            "● "
+        let is_cursor = selected == Some(row);
+        let marked = list.marked.contains(item.id.as_deref().unwrap_or(""));
+        let indent = space().width(SPACE_16 * f32::from(item.depth));
+        let line: Element<'_, Message> = if let Some(expanded) = item.group {
+            // Group header: chevron + uppercase caption.
+            row![
+                indent,
+                text(if expanded { "▾" } else { "▸" })
+                    .size(TEXT_SMALL)
+                    .style(style::text_muted),
+                text(item.label.to_uppercase())
+                    .size(TEXT_CAPTION)
+                    .font(theme::UI_SEMIBOLD)
+                    .style(style::text_muted),
+            ]
+            .spacing(SPACE_6)
+            .align_y(Center)
+            .into()
         } else {
-            ""
+            row![
+                indent,
+                container(space())
+                    .width(STATUS_DOT)
+                    .height(STATUS_DOT)
+                    .style(style::dot(
+                        if marked { Dot::Accent } else { Dot::Idle },
+                        STATUS_DOT
+                    )),
+                text(item.label.as_str())
+                    .size(TEXT_LABEL)
+                    .font(theme::UI_MEDIUM)
+                    .style(style::text_primary),
+                space().width(Fill),
+                text(item.meta.as_str())
+                    .size(MONO_VALUE)
+                    .font(theme::MONO)
+                    .style(move |t: &Theme| text::Style {
+                        color: Some(if is_cursor && focused {
+                            theme::palette(t).text_on_selection
+                        } else {
+                            theme::palette(t).text_muted
+                        }),
+                    }),
+            ]
+            .spacing(SPACE_12)
+            .align_y(Center)
+            .into()
         };
-        let label = format!(
-            "{}{marker}{mark}{}",
-            "    ".repeat(usize::from(item.depth)),
-            item.label
-        );
-        let is_selected = selected == Some(row);
-        let line = row![
-            text(label).size(14),
-            space().width(Fill),
-            text(item.meta.as_str()).size(12).style(text::secondary),
-        ]
-        .align_y(Center);
+        let state = match (is_cursor, marked) {
+            (true, _) if focused => RowState::Cursor,
+            (true, _) | (_, true) => RowState::Selected,
+            _ => RowState::Idle,
+        };
         col = col.push(
             container(line)
                 .width(Fill)
                 .height(ROW_H)
-                .padding([0, 8])
+                .padding([0.0, SPACE_10])
                 .align_y(Center)
-                .style(move |theme: &Theme| row_style(theme, is_selected, focused)),
+                .style(style::row(state)),
         );
     }
     col = col.push(space().height(rows_below));
@@ -420,28 +459,6 @@ pub fn view(list: &ListState, focused: bool) -> Element<'_, Message> {
         .on_scroll(|v| Message::ListScrolled(v.absolute_offset().y, v.bounds().height))
         .height(Fill)
         .into()
-}
-
-fn row_style(theme: &Theme, selected: bool, focused: bool) -> container::Style {
-    if !selected {
-        return container::Style::default();
-    }
-    let palette = theme.extended_palette();
-    container::Style {
-        background: Some(palette.primary.weak.color.into()),
-        text_color: Some(palette.primary.weak.text),
-        border: Border {
-            // The ring is only drawn while this pane has focus.
-            color: if focused {
-                palette.primary.strong.color
-            } else {
-                Color::TRANSPARENT
-            },
-            width: 2.0,
-            radius: 4.0.into(),
-        },
-        ..container::Style::default()
-    }
 }
 
 /// Throwaway data for the exit demo; replaced by real repositories in Sprint 3.
