@@ -55,7 +55,7 @@ fn action_button<'a>(
     kind: ButtonKind,
     action: Action,
 ) -> Element<'a, Message> {
-    button(button_label(label, key))
+    button(container(button_label(label, key)).center_y(Fill))
         .height(BUTTON_H)
         .padding([0.0, SPACE_12])
         .style(style::button(kind))
@@ -206,14 +206,17 @@ impl State {
         }
 
         let commands = button(
-            row![
-                text("Commands")
-                    .size(TEXT_BODY)
-                    .style(style::text_secondary),
-                space().width(Fill),
-                kbd("Ctrl K"),
-            ]
-            .align_y(Center),
+            container(
+                row![
+                    text("Commands")
+                        .size(TEXT_BODY)
+                        .style(style::text_secondary),
+                    space().width(Fill),
+                    kbd("Ctrl K"),
+                ]
+                .align_y(Center),
+            )
+            .center_y(Fill),
         )
         .width(Fill)
         .height(BUTTON_H + SPACE_4)

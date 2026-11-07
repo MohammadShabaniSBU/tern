@@ -169,7 +169,7 @@ pub fn unlock_view(form: &AuthForm) -> Element<'_, Message> {
         .secure(true)
         .size(TEXT_LABEL)
         .padding([SPACE_8, SPACE_10]);
-    let mut submit = button(text("Unlock").align_x(Center).width(Fill))
+    let mut submit = button(container(text("Unlock").align_x(Center).width(Fill)).center_y(Fill))
         .height(INPUT_H_LG)
         .style(crate::theme::style::button(
             crate::theme::style::ButtonKind::Primary,
@@ -209,11 +209,12 @@ pub fn create_view(form: &AuthForm) -> Element<'_, Message> {
         .secure(true)
         .size(TEXT_LABEL)
         .padding([SPACE_8, SPACE_10]);
-    let mut submit = button(text("Create vault").align_x(Center).width(Fill))
-        .height(INPUT_H_LG)
-        .style(crate::theme::style::button(
-            crate::theme::style::ButtonKind::Primary,
-        ));
+    let mut submit =
+        button(container(text("Create vault").align_x(Center).width(Fill)).center_y(Fill))
+            .height(INPUT_H_LG)
+            .style(crate::theme::style::button(
+                crate::theme::style::ButtonKind::Primary,
+            ));
     if !form.busy {
         password = password
             .on_input(|s| Message::PasswordChanged(Sensitive::new(s)))
