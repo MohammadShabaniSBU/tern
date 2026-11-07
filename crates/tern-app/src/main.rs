@@ -3,6 +3,7 @@ mod app;
 mod auth;
 mod autolock;
 mod cheatsheet;
+mod cli;
 mod crash;
 mod host_form;
 mod hosts_view;
@@ -49,7 +50,47 @@ fn pin_gpu_backend() {
     }
 }
 
+/// `tern -c <host>`: no GUI, no logging to the terminal; the exit code is the remote's.
+fn run_cli(name: Option<&str>) -> anyhow::Result<()> {
+    let data_dir = paths::ensure_data_dir()?;
+    let store = match tern_store::Store::open(&data_dir.join("tern.db")) {
+        Ok(store) => store,
+        Err(e) => {
+            eprintln!("tern: {}", e.user_message());
+            std::process::exit(1);
+        }
+    };
+    let Some(name) = name else {
+        // Completion helper: stay quiet on failure (e.g. the GUI holds the database).
+        let _ = cli::list_hosts(store);
+        return Ok(());
+    };
+    match cli::connect(store, name) {
+        Ok(code) => std::process::exit(code),
+        Err(e) => {
+            eprintln!("tern: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
 fn main() -> anyhow::Result<()> {
+    let mode = match cli::parse_args(std::env::args().skip(1)) {
+        Ok(mode) => mode,
+        Err(e) => {
+            eprintln!("tern: {e}");
+            std::process::exit(2);
+        }
+    };
+    match mode {
+        cli::Mode::Print(text) => {
+            println!("{text}");
+            return Ok(());
+        }
+        cli::Mode::Connect(name) => return run_cli(Some(&name)),
+        cli::Mode::ListHosts => return run_cli(None),
+        cli::Mode::Gui => {}
+    }
     #[cfg(unix)]
     pin_gpu_backend();
     let data_dir = paths::ensure_data_dir()?;
