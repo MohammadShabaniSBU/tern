@@ -67,13 +67,22 @@ pub fn view<'a>(keymap: &Keymap, mode: ModeMask) -> Element<'a, Message> {
             body = body.push(
                 iced::widget::row![
                     text(row.title).size(TEXT_BODY).width(Fill),
-                    text(keys).size(TEXT_BODY),
+                    text(keys)
+                        .size(MONO_VALUE)
+                        .font(crate::theme::MONO)
+                        .style(crate::theme::style::text_secondary),
                 ]
                 .spacing(SPACE_24),
             );
         }
     }
-    crate::theme::widgets::dialog(scrollable(body.padding(SPACE_4)), 560.0)
+    crate::theme::widgets::dialog(
+        scrollable(body.padding(iced::Padding {
+            right: SPACE_20,
+            ..iced::Padding::from(SPACE_4)
+        })),
+        560.0,
+    )
 }
 
 #[cfg(test)]
