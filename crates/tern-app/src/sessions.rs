@@ -423,24 +423,11 @@ fn tab_button<'a>(
         .padding([0.0, SPACE_12])
         .align_y(iced::Center)
         .style(style::tab(active));
-    column![
-        container(space())
-            .height(2)
-            .width(Fill)
-            .style(style::tab_edge(active)),
-        tab,
-    ]
-    .pipe_mouse(on_press)
-}
-
-trait PipeMouse<'a> {
-    fn pipe_mouse(self, msg: Message) -> Element<'a, Message>;
-}
-
-impl<'a> PipeMouse<'a> for iced::widget::Column<'a, Message> {
-    fn pipe_mouse(self, msg: Message) -> Element<'a, Message> {
-        iced::widget::mouse_area(self).on_press(msg).into()
-    }
+    // The accent top edge is the outer container's 2 px padding, so the tab keeps its content width.
+    let edged = container(tab)
+        .padding(iced::Padding::ZERO.top(2))
+        .style(style::tab_edge(active));
+    iced::widget::mouse_area(edged).on_press(on_press).into()
 }
 
 /// The tab strip: a "Hosts" home tab followed by one tab per session.
