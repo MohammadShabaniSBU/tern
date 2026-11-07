@@ -3405,7 +3405,7 @@ impl State {
     }
 
     pub fn theme(&self) -> Theme {
-        if self.dark { Theme::Dark } else { Theme::Light }
+        crate::theme::theme(self.dark)
     }
 }
 
@@ -3995,11 +3995,11 @@ mod tests {
     #[test]
     fn theme_toggles_between_dark_and_light() {
         let mut s = main_state();
-        assert_eq!(s.theme(), Theme::Dark);
+        assert_eq!(s.theme(), crate::theme::theme(true));
         let _ = s.update(Message::Dispatch(Action::ToggleTheme));
-        assert_eq!(s.theme(), Theme::Light);
+        assert_eq!(s.theme(), crate::theme::theme(false));
         let _ = s.update(Message::Dispatch(Action::ToggleTheme));
-        assert_eq!(s.theme(), Theme::Dark);
+        assert_eq!(s.theme(), crate::theme::theme(true));
     }
 
     #[test]

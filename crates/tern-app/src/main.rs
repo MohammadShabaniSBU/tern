@@ -21,6 +21,7 @@ mod reauth;
 mod sessions;
 mod settings;
 mod term_settings;
+mod theme;
 mod toast;
 mod tunnel_form;
 mod tunnel_run;
@@ -49,7 +50,10 @@ fn main() -> anyhow::Result<()> {
     )
     .title("tern")
     .font(app::FONT_BYTES)
-    .default_font(app::MONO)
+    .font(theme::INTER_REGULAR)
+    .font(theme::INTER_MEDIUM)
+    .font(theme::INTER_SEMIBOLD)
+    .default_font(theme::UI)
     .subscription(State::subscription)
     .theme(State::theme)
     .window_size((1100.0, 700.0))
