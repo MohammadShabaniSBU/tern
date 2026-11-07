@@ -147,10 +147,13 @@ impl State {
                             .size(TEXT_BODY)
                             .style(style::text_secondary),
                         space().width(Fill),
-                        text(format!("Alt {}", i + 1))
-                            .size(MONO_KBD)
-                            .font(theme::MONO)
-                            .style(style::text_muted),
+                        text(crate::sessions::key_label(
+                            &self.keymap,
+                            Action::jump_tab(i)
+                        ))
+                        .size(MONO_KBD)
+                        .font(theme::MONO)
+                        .style(style::text_muted),
                     ]
                     .spacing(SPACE_8)
                     .align_y(Center)

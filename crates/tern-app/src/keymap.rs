@@ -488,7 +488,10 @@ fn terminal_shortcut(first: &Chord) -> bool {
         KeyId::Named(Named::Tab) => first.mods.control() && !first.mods.alt(),
         KeyId::Named(Named::PageUp | Named::PageDown) => first.mods == Modifiers::SHIFT,
         KeyId::Char(c) => {
-            first.mods == Modifiers::CTRL && (c.is_ascii_digit() || matches!(c, '=' | '-' | '+'))
+            (first.mods == Modifiers::CTRL
+                && (c.is_ascii_digit() || matches!(c, '=' | '-' | '+')))
+                // Font reset.
+                || (first.mods == (Modifiers::CTRL | Modifiers::ALT) && *c == '0')
         }
         _ => false,
     }
@@ -878,5 +881,12 @@ mod tests {
             Some(Message::Acknowledge)
         ));
         assert!(auth_message_for_key(&Key::Character("k".into()), Modifiers::CTRL).is_none());
+    }
+
+    #[test]
+    fn jump_home_does_not_clash_with_font_reset() {
+        let km = Keymap::defaults();
+        assert!(km.conflicts_with(Action::JumpHome).is_empty());
+        assert!(km.conflicts_with(Action::FontReset).is_empty());
     }
 }

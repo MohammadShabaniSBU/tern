@@ -199,6 +199,7 @@ actions! {
     NextTab      => "tab.next",       "Next tab",              Tabs, ["ctrl+tab"], G;
     PrevTab      => "tab.prev",       "Previous tab",          Tabs, ["ctrl+shift+tab"], G;
     Reconnect    => "session.reconnect", "Reconnect disconnected session", Tabs, ["r"], N;
+    JumpHome     => "tab.jump_home",  "Go to Hosts (home tab)", Tabs, ["ctrl+shift+0"], G;
     JumpTab1     => "tab.jump_1",     "Go to tab 1",           Tabs, ["ctrl+shift+1"], G;
     JumpTab2     => "tab.jump_2",     "Go to tab 2",           Tabs, ["ctrl+shift+2"], G;
     JumpTab3     => "tab.jump_3",     "Go to tab 3",           Tabs, ["ctrl+shift+3"], G;
@@ -221,7 +222,7 @@ actions! {
     ScrollPageDown => "term.scroll_down", "Scroll terminal page down", Terminal, ["shift+pagedown"], G;
     FontBigger   => "term.font_bigger", "Terminal font bigger", Terminal, ["ctrl+="], G;
     FontSmaller  => "term.font_smaller", "Terminal font smaller", Terminal, ["ctrl+-"], G;
-    FontReset    => "term.font_reset", "Terminal font size reset", Terminal, ["ctrl+0"], G;
+    FontReset    => "term.font_reset", "Terminal font size reset", Terminal, ["ctrl+alt+0"], G;
     CycleScheme  => "term.scheme",    "Cycle terminal color scheme", Terminal, [], G;
     CycleCursor  => "term.cursor",    "Cycle terminal cursor style", Terminal, [], G;
     ToggleBell   => "term.bell",      "Toggle visual bell",    Terminal, [], G;
@@ -256,6 +257,23 @@ impl Action {
             Action::JumpTab9 => 8,
             _ => return None,
         })
+    }
+
+    /// The `JumpTabN` action for a 0-based tab index.
+    pub fn jump_tab(index: usize) -> Option<Action> {
+        [
+            Action::JumpTab1,
+            Action::JumpTab2,
+            Action::JumpTab3,
+            Action::JumpTab4,
+            Action::JumpTab5,
+            Action::JumpTab6,
+            Action::JumpTab7,
+            Action::JumpTab8,
+            Action::JumpTab9,
+        ]
+        .get(index)
+        .copied()
     }
 
     pub fn from_id(id: &str) -> Option<Action> {

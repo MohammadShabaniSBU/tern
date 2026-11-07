@@ -30,6 +30,7 @@ A remote shell needs `Ctrl+A`, `Ctrl+W`, `Ctrl+K`, etc. So while a terminal is f
 | `Ctrl+Shift+T` | New tab from host picker |
 | `Ctrl+Shift+W` | Close current tab |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous tab |
+| `Ctrl+Shift+0` (also `Ctrl+0` inside a terminal) | Go to the Hosts home tab |
 | `Ctrl+Shift+1..9` (also `Ctrl+1..9` inside a terminal) | Jump to tab N |
 | `Ctrl+Shift+R` / `Ctrl+Shift+D` | Rename / duplicate tab |
 | `Ctrl+Shift+L` | Lock vault |
@@ -87,7 +88,7 @@ Everything except `Ctrl+Shift+<key>`, the leader, `Ctrl+Tab`, `Ctrl+1..9/0/=/-` 
 | `Ctrl+Shift+F` | Search scrollback; `Enter` next, `Ctrl+Shift+Alt+G` previous, `Esc` closes |
 | `Ctrl+Shift+G` | Next search match |
 | `Ctrl+Shift+Space` | Keyboard copy mode |
-| `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | Font size up / down / reset |
+| `Ctrl+=` / `Ctrl+-` / `Ctrl+Alt+0` | Font size up / down / reset |
 | `Ctrl+Shift+Esc` | Back to Normal mode |
 
 Copy mode: `h j k l`/arrows move, `w`/`b` word, `0`/`$` line ends, `g`/`G` top/bottom, `Ctrl+U`/`Ctrl+D` half page, `v` start/stop selection, `y` copy (the current line if nothing selected), `n`/`N` next/previous search match, `/` search, `Esc`/`q` exit.

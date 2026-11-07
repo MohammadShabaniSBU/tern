@@ -22,8 +22,10 @@ use tern_term::widget::{TermEvent, TerminalView};
 use tern_term::{Emulator, Snapshot};
 use tokio::sync::mpsc::Receiver;
 
+use crate::action::Action;
 use crate::app::Message;
 use crate::auth::Sensitive;
+use crate::keymap::Keymap;
 use crate::palette::QuickTarget;
 use crate::term_settings::TermSettings;
 use crate::theme;
@@ -431,15 +433,35 @@ fn tab_button<'a>(
 }
 
 /// The tab strip: a "Hosts" home tab followed by one tab per session.
-pub fn tab_bar<'a>(tabs: &'a [SessionView], active: Option<usize>) -> Element<'a, Message> {
+/// Display text of the first key bound to `action` (`Ctrl+Shift+1`), empty when unbound.
+pub fn key_label(keymap: &Keymap, action: Option<Action>) -> String {
+    action
+        .and_then(|a| {
+            keymap
+                .keys_for(a)
+                .first()
+                .map(|k| crate::palette::pretty_keys(k))
+        })
+        .unwrap_or_default()
+}
+
+pub fn tab_bar<'a>(
+    tabs: &'a [SessionView],
+    active: Option<usize>,
+    keymap: &Keymap,
+) -> Element<'a, Message> {
     let mut strip = row![].spacing(SPACE_4).align_y(iced::Alignment::End);
     strip = strip.push(tab_button(
         row![
             text("Hosts").size(TEXT_BODY).font(theme::UI_MEDIUM),
-            text(if active.is_none() { "Alt 0" } else { "" })
-                .size(MONO_KBD)
-                .font(theme::MONO)
-                .style(style::text_muted),
+            text(if active.is_none() {
+                key_label(keymap, Some(Action::JumpHome))
+            } else {
+                String::new()
+            })
+            .size(MONO_KBD)
+            .font(theme::MONO)
+            .style(style::text_muted),
         ]
         .spacing(SPACE_8),
         active.is_none(),
@@ -477,7 +499,7 @@ pub fn tab_bar<'a>(tabs: &'a [SessionView], active: Option<usize>) -> Element<'a
                 }),
             state_note,
             text(if is_active {
-                format!("Alt {}", i + 1)
+                key_label(keymap, Action::jump_tab(i))
             } else {
                 String::new()
             })

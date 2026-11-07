@@ -1242,6 +1242,7 @@ impl State {
                 }
             },
             Action::NewTab => self.go_home(),
+            Action::JumpHome => self.go_home(),
             Action::NextTab => self.cycle_tab(true),
             Action::PrevTab => self.cycle_tab(false),
             Action::JumpTab1
@@ -3204,7 +3205,11 @@ impl State {
         let base: Element<'_, Message> = if self.tabs.is_empty() {
             content
         } else {
-            column![sessions::tab_bar(&self.tabs, self.active), content].into()
+            column![
+                sessions::tab_bar(&self.tabs, self.active, &self.keymap),
+                content
+            ]
+            .into()
         };
         let mut layers: Vec<Element<'_, Message>> = vec![self.with_overlays(base)];
         if let Some(toasts) = self.toast_layer() {
@@ -3737,6 +3742,10 @@ mod tests {
         assert_eq!(s.active, Some(0));
         let _ = s.update(Message::Dispatch(Action::PrevTab));
         assert_eq!(s.active, Some(2));
+        let _ = s.update(Message::Dispatch(Action::JumpTab2));
+        assert_eq!(s.active, Some(1));
+        let _ = s.update(Message::Dispatch(Action::JumpHome));
+        assert_eq!(s.active, None);
         let _ = s.update(Message::Dispatch(Action::JumpTab2));
         assert_eq!(s.active, Some(1));
         // Out of range is ignored.
